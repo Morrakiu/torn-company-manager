@@ -3,7 +3,8 @@
 Tampermonkey userscript for [Torn.com](https://www.torn.com) company management.
 
 **Author:** Morrakiu  
-**Version:** 3.1.1
+**Version:** 3.1.1  
+**Repo:** https://github.com/Morrakiu/torn-company-manager
 
 ## Features
 
@@ -17,19 +18,19 @@ Tampermonkey userscript for [Torn.com](https://www.torn.com) company management.
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/)
-2. Open the raw script: [Torn_Company_Manager.user.js](https://raw.githubusercontent.com/Morrakiu/torn-company-manager/main/Torn_Company_Manager.user.js)
-3. Tampermonkey should prompt to install
+2. Open the raw script: https://raw.githubusercontent.com/Morrakiu/torn-company-manager/main/Torn_Company_Manager.user.js
+3. Confirm install in Tampermonkey
 4. Visit **Companies** on Torn (`companies.php`)
 5. Paste your API key, or click **Create Custom Key**
 
-## API key permissions
+## API key
 
 | Section | Selections |
 |---------|------------|
 | user | `profile`, `job`, `basic` |
 | company | `profile`, `employees`, `stock`, `detailed` |
 
-Full employee stats and stock require a **Director** key.
+Full employee/stock data requires a **Director** key.
 
 ## License
 
