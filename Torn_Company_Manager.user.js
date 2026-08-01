@@ -14,4 +14,20 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-PLACEHOLDER
+(function () {
+    'use strict';
+
+    const API_BASE_V1 = 'https://api.torn.com';
+    const API_BASE_V2 = 'https://api.torn.com/v2';
+    const CACHE_MS = 45 * 1000;
+    // Pre-fills Torn's custom key form with only the selections this script needs
+    const CUSTOM_KEY_URL = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Company+Manager&user=profile,job,basic&company=profile,employees,stock,detailed';
+    let apiKey = GM_getValue('tornCompanyApiKey', '');
+    let lastFetch = 0;
+    let companyData = null;
+    let userInfo = null;
+
+    // See repository release / raw file for complete script body.
+    // This commit placeholder will be replaced immediately.
+    console.log('Torn Company Manager – load full script from repo raw URL');
+})();
