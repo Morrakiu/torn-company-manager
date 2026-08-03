@@ -3,7 +3,7 @@
 Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.9.0  
+**Version:** 3.10.3  
 **Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — full script on this branch (raw install via Tampermonkey)
 
 ---
@@ -39,9 +39,9 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 - Recommendations also use **week-over-week metric deltas** (efficiency / environment / effectiveness / popularity) and live low-effectiveness staff
 
 ### Weekly metrics history
-- Snapshots company efficiency, work environment, avg (and per-role) employee effectiveness, popularity
-- Kept for 12 ISO weeks; compared to the previous week on the dashboard
-- Synced through **Data Sync** so web and PDA share the same history
+- Snapshots company efficiency, work environment, avg (and per-role) employee effectiveness, popularity, role mix, staffing flags
+- **JSONBin keeps the last 4 ISO weeks** (older weeks pruned)
+- Compared to the previous week on the dashboard and in the **weekly Discord panel**
 
 ### 10★ peer role-mix
 - Caches company IDs while you browse the **Job List**
@@ -49,14 +49,15 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 - **Refresh Peers** builds average staffing by role vs yours
 
 ### Discord reports
-- Dedicated **Discord** tab with **two optional webhooks**:
-  - **Permanent log** — appends a new message each run (history channel)
-  - **Data panel** — posts once, then **edits the same message** daily (live dashboard)
+- Dedicated **Discord** tab with **three optional webhooks**:
+  - **Permanent log** — appends a new message each daily run (history channel)
+  - **Daily data panel** — edits the same message daily
+  - **Weekly panel** — Sundays **18:00 TCT**; week-over-week metrics + company changes that can affect those stats (roles, Manager/Trainer/Marketer, headcount, ad budget, rating, etc.)
+  - **4-week trend panel** — separate persistent message on the **daily data panel** webhook; updated only on the **first Sunday of each month**, and also appended to the **permanent log** when set (dashboard always shows the 4-week trend)
 - Optional daily auto-post at **18:00 TCT** while the companies page is open
-- **Multi-device log dedupe**: with Data Sync, only one client posts the permanent log per TCT day (JSONBin claim)
-- Report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down
-- Both webhook URLs, options, and the panel message id sync through **JSONBin**
-- **Reset Panel Message** clears the stored message id if you deleted the Discord message
+- **Multi-device dedupe** for daily log, weekly panel, and monthly 4-week panel via JSONBin claims
+- Daily report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down
+- Webhook URLs, options, and panel message ids sync through **JSONBin**
 
 ### Data Sync (Web ↔ PDA)
 JSONBin is the shared store for **trains**, **weekly metrics**, **Discord settings**, and the **daily log claim**.
@@ -74,7 +75,7 @@ See [Data Sync setup](#data-sync-setup-web--pda) below.
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) (or use TornPDA script support).
 2. Open the **raw** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) from this repository and choose **Install** in Tampermonkey.  
-   The full **v3.9.0** userscript lives on the `main` branch of this repo.
+   The full **v3.10.3** userscript is on the `main` branch of this repo.
 3. Visit [companies.php](https://www.torn.com/companies.php).
 4. Enter a Torn API key (or use **Create Custom Key**).
 
@@ -123,13 +124,15 @@ JSONBin rejects a blank body (`Bin cannot be blank`). Use a real starter object.
   "discord": {
     "logWebhook": "",
     "panelWebhook": "",
+    "weeklyWebhook": "",
     "webhook": "",
     "opts": {
       "unusedTrains": false,
       "dailyMetrics": false,
       "employeeAlerts": false,
       "starChange": false,
-      "autoPost": true
+      "autoPost": true,
+      "weeklyPanel": true
     },
     "meta": {}
   }
@@ -146,10 +149,11 @@ On company load the script **pulls**, **merges** (higher train counts win; prune
 
 ### Discord webhooks (optional)
 
-1. Server settings → Integrations → Webhooks → New webhook (create one or two).
-2. Paste **Permanent log** and/or **Data panel** URLs on the Discord tab.
-3. Data panel uses Discord’s webhook message edit API so one message stays current.
-4. With **Data Sync**, only one device posts the permanent log each TCT day.
+1. Server settings → Integrations → Webhooks → New webhook (create one or more).
+2. Paste **Permanent log**, **Daily data panel**, and/or **Weekly panel** URLs on the Discord tab.
+3. Daily panel and weekly panel use Discord’s webhook message edit API so one message stays current.
+4. On the **first Sunday of each month**, a **4-week trend** message is updated on the daily panel webhook and also appended to the permanent log.
+5. With **Data Sync**, only one device posts the permanent log each TCT day (and the monthly 4-week archive).
 
 ---
 
@@ -181,13 +185,29 @@ Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rule
 
 | File | Description |
 |------|-------------|
-| `Torn_Company_Manager.user.js` | **Full** v3.9.0 userscript (main branch) |
+| `Torn_Company_Manager.user.js` | **Full** v3.10.3 userscript (`main` branch) |
 | `README.md` | This document |
 | `INSTALL.md` | Short install notes |
 
 ---
 
 ## Changelog
+
+### 3.10.3
+- 4-week panel moved to the **daily data panel** webhook (own edit-in-place message)
+- Updates only on the **first Sunday of each month**; also posts to **permanent log** when configured
+- Manual **Post / Update 4-Week Now** + reset control
+
+### 3.10.2
+- 4-week trend chart on the dashboard
+- (Superseded) chart was briefly attached to the weekly panel
+
+### 3.10.1
+- Metrics history expanded to **4 ISO weeks** in JSONBin (was 2)
+
+### 3.10.0
+- Third Discord webhook: **weekly panel** (Sundays 18:00 TCT) with week-over-week metrics + staffing/company changes
+- JSONBin metrics pruned for size; snapshot includes role counts, Manager/Trainer/Marketer flags, headcount, ad budget
 
 ### 3.9.0
 - Weekly metrics log: company efficiency, work environment, avg employee effectiveness (+ popularity)
