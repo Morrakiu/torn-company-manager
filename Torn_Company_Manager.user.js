@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Company Manager
 // @namespace    https://torn.com/
-// @version      3.9.0
-// @description  Director dashboard: weekly metrics, smart training, dual Discord webhooks, peers, JSONBin Data Sync, API v2.
+// @version      3.10.1
+// @description  Director dashboard: weekly metrics panel, smart training, Discord webhooks, peers, JSONBin Data Sync, API v2.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=companies*
@@ -30,6 +30,7 @@
     // Dual Discord webhooks: permanent log (append) + live data panel (edit same message)
     let discordLogWebhook = GM_getValue('tcmDiscordLogWebhook', '') || GM_getValue('tcmDiscordWebhook', '');
     let discordPanelWebhook = GM_getValue('tcmDiscordPanelWebhook', '');
+    let discordWeeklyWebhook = GM_getValue('tcmDiscordWeeklyWebhook', '');
     let jsonbinId = GM_getValue('tcmJsonbinId', '');
     let jsonbinKey = GM_getValue('tcmJsonbinKey', '');
     const DEFAULT_DISCORD_OPTS = {
@@ -37,7 +38,8 @@
         dailyMetrics: false,
         employeeAlerts: false,
         starChange: false,
-        autoPost: true
+        autoPost: true,
+        weeklyPanel: true
     };
     // Discord report options (synced via JSONBin) — loaded after helper fns via initDiscordState()
     let discordOpts = Object.assign({}, DEFAULT_DISCORD_OPTS);
@@ -57,7 +59,8 @@
     const DISCORD_OPTS_KEY = 'tcmDiscordOpts';
     const DISCORD_META_KEY = 'tcmDiscordMeta';
     const CLIENT_ID_KEY = 'tcmClientId';
-    const METRICS_KEEP_WEEKS = 12;
+    // Keep recent ISO weeks for comparisons (JSONBin size control)
+    const METRICS_KEEP_WEEKS = 4;
 
     /** Stable per-install id for multi-device log dedupe */
     function getClientId() {
@@ -1435,7 +1438,7 @@
 
     /**
      * Record / refresh this week's snapshot from live company data.
-     * Keeps last METRICS_KEEP_WEEKS weeks.
+     * Retains the last METRICS_KEEP_WEEKS ISO weeks in JSONBin/local storage.
      */
     function recordMetricsSnapshot(p, employees) {
         const empList = getEmpList(
@@ -1461,6 +1464,15 @@
             return loadMetricsLog();
         }
 
+        const roleCounts = {};
+        empList.forEach(e => {
+            const role = (safeStr(e.position) || 'unknown').toLowerCase();
+            roleCounts[role] = (roleCounts[role] || 0) + 1;
+        });
+        const hasManager = !!(roleCounts.manager || roleCounts['store manager']);
+        const hasTrainer = !!(roleCounts.trainer || roleCounts['hr officer'] || roleCounts.hr);
+        const hasMarketer = !!(roleCounts.promoter || roleCounts.marketer || roleCounts['marketing manager']);
+
         const log = loadMetricsLog();
         log.weeks[weekKey] = {
             week: weekKey,
@@ -1470,18 +1482,35 @@
             popularity: popularity,
             avgEffectiveness: empStats.avgEffectiveness,
             empSample: empStats.empSample,
+            empCount: empList.length,
             byRole: empStats.byRole,
+            roleCounts: roleCounts,
+            hasManager: hasManager,
+            hasTrainer: hasTrainer,
+            hasMarketer: hasMarketer,
             rating: numOrNull(profile.rating != null ? profile.rating : profile.stars),
-            dailyIncome: numOrNull(profile.daily_income)
+            dailyIncome: numOrNull(profile.daily_income),
+            adBudget: numOrNull(profile.advertising_budget),
+            hired: numOrNull(profile.employees_hired),
+            capacity: numOrNull(profile.employees_capacity)
         };
         log.lastSnapshotDay = getTCTParts().dateStr;
+        pruneMetricsHistory(log, weekKey);
+        saveMetricsLog(log);
+        return log;
+    }
 
-        // Cap history
+    /** Keep the newest METRICS_KEEP_WEEKS ISO week keys (always includes current when known) */
+    function pruneMetricsHistory(log, currentWeekKey) {
+        if (!log || !log.weeks) return log;
+        const cur = currentWeekKey || isoWeekKey();
+        if (cur && !log.weeks[cur] && Object.keys(log.weeks).length) {
+            // current may not be written yet; still prune around known keys
+        }
         const keys = Object.keys(log.weeks).sort();
         while (keys.length > METRICS_KEEP_WEEKS) {
             delete log.weeks[keys.shift()];
         }
-        saveMetricsLog(log);
         return log;
     }
 
@@ -1562,10 +1591,112 @@
             if (!l) out.weeks[wk] = r;
             else if ((Number(r.updated) || 0) >= (Number(l.updated) || 0)) out.weeks[wk] = r;
         });
-        const keys = Object.keys(out.weeks).sort();
-        while (keys.length > METRICS_KEEP_WEEKS) delete out.weeks[keys.shift()];
+        pruneMetricsHistory(out, isoWeekKey());
         out.lastSnapshotDay = (local && local.lastSnapshotDay) || (remote && remote.lastSnapshotDay) || null;
         return out;
+    }
+
+    /** Human-readable company changes that can affect tracked stats */
+    function describeCompanyChanges(cur, prev) {
+        const lines = [];
+        if (!cur) return ['No current-week snapshot yet.'];
+        if (!prev) return ['No previous-week snapshot — baseline recorded this week.'];
+
+        const pushDelta = (label, a, b, suffix) => {
+            const d = metricDelta(a, b);
+            if (d == null || d === 0) return;
+            lines.push(label + ': **' + formatDelta(d, suffix || '') + '** (' +
+                (b != null ? b + (suffix || '') : '?') + ' → ' +
+                (a != null ? a + (suffix || '') : '?') + ')');
+        };
+
+        pushDelta('Efficiency', cur.efficiency, prev.efficiency, '%');
+        pushDelta('Work environment', cur.environment, prev.environment, '');
+        pushDelta('Avg employee effectiveness', cur.avgEffectiveness, prev.avgEffectiveness, '');
+        pushDelta('Popularity', cur.popularity, prev.popularity, '%');
+        pushDelta('Rating', cur.rating, prev.rating, '★');
+        pushDelta('Daily income', cur.dailyIncome, prev.dailyIncome, '');
+        pushDelta('Ad budget', cur.adBudget, prev.adBudget, '');
+        pushDelta('Headcount', cur.empCount != null ? cur.empCount : cur.hired, prev.empCount != null ? prev.empCount : prev.hired, '');
+
+        if (!!cur.hasManager !== !!prev.hasManager) {
+            lines.push(cur.hasManager ? 'Manager **staffed** (was missing).' : 'Manager **removed** / unassigned.');
+        }
+        if (!!cur.hasTrainer !== !!prev.hasTrainer) {
+            lines.push(cur.hasTrainer ? 'Trainer / HR **staffed** (was missing).' : 'Trainer / HR **removed** / unassigned.');
+        }
+        if (!!cur.hasMarketer !== !!prev.hasMarketer) {
+            lines.push(cur.hasMarketer ? 'Promoter / Marketer **staffed** (was missing).' : 'Promoter / Marketer **removed** / unassigned.');
+        }
+
+        const rc = cur.roleCounts || {};
+        const rp = prev.roleCounts || {};
+        const allRoles = Array.from(new Set(Object.keys(rc).concat(Object.keys(rp)))).sort();
+        allRoles.forEach(role => {
+            const a = rc[role] || 0;
+            const b = rp[role] || 0;
+            if (a === b) return;
+            if (b === 0 && a > 0) lines.push('Role **' + role + '** added (×' + a + ').');
+            else if (a === 0 && b > 0) lines.push('Role **' + role + '** cleared (was ×' + b + ').');
+            else lines.push('Role **' + role + '** staffing ' + b + ' → ' + a + ' (' + formatDelta(a - b) + ').');
+        });
+
+        // Role effectiveness shifts (can drive company efficiency)
+        const br = cur.byRole || {};
+        const bp = prev.byRole || {};
+        Object.keys(br).forEach(role => {
+            if (!bp[role]) return;
+            const d = metricDelta(br[role].avgEff, bp[role].avgEff);
+            if (d != null && Math.abs(d) >= 3) {
+                lines.push('**' + role + '** avg effectiveness ' + formatDelta(d) +
+                    ' (' + bp[role].avgEff + ' → ' + br[role].avgEff + ').');
+            }
+        });
+
+        if (!lines.length) lines.push('No material staffing or metric changes detected vs last week.');
+        return lines.slice(0, 25);
+    }
+
+    function buildWeeklyPanelEmbeds() {
+        const { curKey, prevKey, cur, prev } = getWeeklyComparison();
+        const changeLines = describeCompanyChanges(cur, prev);
+        const metricFields = [
+            { name: 'Efficiency', value: fmtWeekPair(cur && cur.efficiency, prev && prev.efficiency, '%'), inline: true },
+            { name: 'Environment', value: fmtWeekPair(cur && cur.environment, prev && prev.environment, ''), inline: true },
+            { name: 'Avg emp. eff.', value: fmtWeekPair(cur && cur.avgEffectiveness, prev && prev.avgEffectiveness, ''), inline: true },
+            { name: 'Popularity', value: fmtWeekPair(cur && cur.popularity, prev && prev.popularity, '%'), inline: true },
+            { name: 'Rating', value: fmtWeekPair(cur && cur.rating, prev && prev.rating, '★'), inline: true },
+            { name: 'Headcount', value: fmtWeekPair(
+                cur && (cur.empCount != null ? cur.empCount : cur.hired),
+                prev && (prev.empCount != null ? prev.empCount : prev.hired),
+                ''
+            ), inline: true }
+        ];
+        return [
+            {
+                title: 'Weekly company panel',
+                description: 'Week **' + curKey + '**' + (prevKey ? ' vs **' + prevKey + '**' : ' (first week)') +
+                    '\nMetrics use company efficiency, work environment, employee effectiveness, and related drivers.',
+                color: 0x7eb8ff,
+                fields: metricFields,
+                timestamp: new Date().toISOString()
+            },
+            {
+                title: 'Changes that can affect these stats',
+                description: changeLines.join('\n').slice(0, 3800),
+                color: 0xf0c040,
+                timestamp: new Date().toISOString()
+            }
+        ];
+    }
+
+    function fmtWeekPair(cur, prev, suffix) {
+        const s = suffix || '';
+        const d = metricDelta(cur, prev);
+        const curS = cur != null ? cur + s : '—';
+        const prevS = prev != null ? prev + s : '—';
+        const dS = d == null ? '' : ' (' + formatDelta(d, s) + ')';
+        return curS + ' · was ' + prevS + dS;
     }
 
     /** Stable employee id used in train log keys */
@@ -1637,7 +1768,9 @@
     }
 
     function hasAnyDiscordWebhook() {
-        return isValidDiscordWebhook(discordLogWebhook) || isValidDiscordWebhook(discordPanelWebhook);
+        return isValidDiscordWebhook(discordLogWebhook) ||
+            isValidDiscordWebhook(discordPanelWebhook) ||
+            isValidDiscordWebhook(discordWeeklyWebhook);
     }
 
     function cleanEmbeds(list) {
@@ -1725,6 +1858,7 @@
             discord: {
                 logWebhook: discordLogWebhook || '',
                 panelWebhook: discordPanelWebhook || '',
+                weeklyWebhook: discordWeeklyWebhook || '',
                 // legacy field for older clients
                 webhook: discordLogWebhook || '',
                 opts: discordOpts || loadDiscordOpts(),
@@ -2072,21 +2206,133 @@
         }
     }
 
+    async function shouldPostWeeklyPanel(weekKey, force) {
+        if (force) return true;
+        if (jsonbinId && jsonbinKey) {
+            try { await pullTrainLogRemote(); } catch (e) { /* local */ }
+        }
+        if (discordMeta.lastWeeklyPostWeek === weekKey) return false;
+        // Claim this week
+        const myId = getClientId();
+        const now = Date.now();
+        if (
+            discordMeta.weeklyClaimWeek === weekKey &&
+            discordMeta.weeklyClaimId &&
+            discordMeta.weeklyClaimId !== myId &&
+            (now - (Number(discordMeta.weeklyClaimTs) || 0)) < 3 * 60 * 1000
+        ) {
+            return false;
+        }
+        discordMeta.weeklyClaimWeek = weekKey;
+        discordMeta.weeklyClaimId = myId;
+        discordMeta.weeklyClaimTs = now;
+        saveDiscordMeta(discordMeta);
+        if (jsonbinId && jsonbinKey) {
+            try {
+                await pushTrainLogRemote(loadTrainLog());
+                await sleep(900);
+                try { await pullTrainLogRemote(); } catch (e) { /* ignore */ }
+                if (discordMeta.lastWeeklyPostWeek === weekKey) return false;
+                if (discordMeta.weeklyClaimWeek === weekKey && discordMeta.weeklyClaimId && discordMeta.weeklyClaimId !== myId) {
+                    return false;
+                }
+            } catch (e) { /* allow local */ }
+        }
+        return true;
+    }
+
+    async function runWeeklyDiscordPanel(force) {
+        if (!isValidDiscordWebhook(discordWeeklyWebhook)) {
+            if (force) setStatus('Set the weekly panel webhook in the Discord tab', true);
+            return { ok: false, reason: 'no_weekly_webhook' };
+        }
+        if (!force && discordOpts.weeklyPanel === false) {
+            return { ok: false, reason: 'disabled' };
+        }
+        if (!companyData && force) {
+            if (force) setStatus('Load company data first', true);
+            return { ok: false, reason: 'no_data' };
+        }
+        if (companyData) {
+            try {
+                recordMetricsSnapshot(
+                    companyData.company || companyData.profile || {},
+                    companyData
+                );
+            } catch (e) { /* ignore */ }
+        }
+        const weekKey = isoWeekKey();
+        const may = await shouldPostWeeklyPanel(weekKey, force);
+        if (!may) {
+            if (force) setStatus('Weekly panel already posted this ISO week (or claimed by another device)');
+            else console.log('[TCM] Weekly panel skipped — already done for', weekKey);
+            return { ok: false, reason: 'already' };
+        }
+        const embeds = cleanEmbeds(buildWeeklyPanelEmbeds());
+        const body = {
+            username: 'Company Manager',
+            content: '**Weekly metrics panel** · **' + weekKey + '**' + (force ? ' (manual)' : ' · Sunday 18:00 TCT'),
+            embeds: embeds
+        };
+        try {
+            const existingId = discordMeta.weeklyPanelMessageId || null;
+            let posted = false;
+            if (existingId) {
+                try {
+                    await editWebhookMessage(discordWeeklyWebhook, existingId, body);
+                    posted = true;
+                } catch (e) {
+                    console.warn('[TCM] Weekly panel edit failed', e && e.message);
+                    discordMeta.weeklyPanelMessageId = null;
+                }
+            }
+            if (!posted) {
+                const res = await postToWebhook(discordWeeklyWebhook, body, true);
+                const msg = res && res.data;
+                const newId = msg && (msg.id || (msg.message && msg.message.id));
+                if (newId) discordMeta.weeklyPanelMessageId = String(newId);
+            }
+            discordMeta.lastWeeklyPostWeek = weekKey;
+            discordMeta.lastWeeklyPostTs = Date.now();
+            saveDiscordMeta(discordMeta);
+            try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
+            setStatus('Weekly panel ' + (posted || discordMeta.weeklyPanelMessageId ? 'updated' : 'posted') + ' · ' + weekKey);
+            return { ok: true };
+        } catch (e) {
+            setStatus('Weekly panel failed: ' + (e.message || e), true);
+            return { ok: false, reason: e.message || 'error' };
+        }
+    }
+
     function scheduleDiscord18TCT() {
-        // Check every minute: if 18:00–18:10 TCT and not yet posted today, run
+        // Daily 18:00 TCT reports + Sunday 18:00 TCT weekly panel
         const tick = async () => {
             try {
-                if (!discordOpts.autoPost) return;
-                if (!hasAnyDiscordWebhook() || !anyDiscordReportEnabled()) return;
                 const tct = getTCTParts();
                 if (tct.h !== 18) return;
                 if (tct.min > 10) return;
 
-                // Pull shared meta so multi-device installs see today's log claim / last post
                 if (jsonbinId && jsonbinKey) {
                     try { await pullTrainLogRemote(); } catch (e) { /* local only */ }
                 }
-                // Another device (or this one) already completed today's auto-run
+
+                // Sunday weekly panel (UTC day 0)
+                const isSunday = new Date().getUTCDay() === 0;
+                if (isSunday && isValidDiscordWebhook(discordWeeklyWebhook) && discordOpts.weeklyPanel !== false) {
+                    if (discordMeta.lastWeeklyPostWeek !== isoWeekKey()) {
+                        if (!companyData || (Date.now() - lastFetch > 10 * 60 * 1000)) {
+                            if (apiKey) {
+                                try { await fetchAll(true); } catch (e) { /* stale ok */ }
+                            }
+                        }
+                        await runWeeklyDiscordPanel(false);
+                    }
+                }
+
+                if (!discordOpts.autoPost) return;
+                if (!hasAnyDiscordWebhook() || !anyDiscordReportEnabled()) return;
+
+                // Another device (or this one) already completed today's daily auto-run
                 if (
                     discordMeta.lastLogPostDateTCT === tct.dateStr ||
                     discordMeta.lastPostDateTCT === tct.dateStr
@@ -2132,6 +2378,10 @@
                 if (body.discord.panelWebhook != null) {
                     discordPanelWebhook = String(body.discord.panelWebhook || '');
                     GM_setValue('tcmDiscordPanelWebhook', discordPanelWebhook);
+                }
+                if (body.discord.weeklyWebhook != null) {
+                    discordWeeklyWebhook = String(body.discord.weeklyWebhook || '');
+                    GM_setValue('tcmDiscordWeeklyWebhook', discordWeeklyWebhook);
                 }
                 if (body.discord.opts && typeof body.discord.opts === 'object') {
                     saveDiscordOpts(Object.assign({}, discordOpts, body.discord.opts));
@@ -2213,13 +2463,15 @@
   "discord": {
     "logWebhook": "",
     "panelWebhook": "",
+    "weeklyWebhook": "",
     "webhook": "",
     "opts": {
       "unusedTrains": false,
       "dailyMetrics": false,
       "employeeAlerts": false,
       "starChange": false,
-      "autoPost": true
+      "autoPost": true,
+      "weeklyPanel": true
     },
     "meta": {}
   }
@@ -2778,50 +3030,69 @@
         const o = discordOpts || loadDiscordOpts();
         const logWh = (discordLogWebhook || '').replace(/"/g, '&quot;');
         const panelWh = (discordPanelWebhook || '').replace(/"/g, '&quot;');
+        const weeklyWh = (discordWeeklyWebhook || '').replace(/"/g, '&quot;');
         const logOk = isValidDiscordWebhook(discordLogWebhook);
         const panelOk = isValidDiscordWebhook(discordPanelWebhook);
+        const weeklyOk = isValidDiscordWebhook(discordWeeklyWebhook);
         const last = discordMeta.lastPostDateTCT
-            ? ('Last auto-post: <strong>' + discordMeta.lastPostDateTCT + '</strong> TCT')
-            : 'No auto-post yet';
+            ? ('Last daily auto-post: <strong>' + discordMeta.lastPostDateTCT + '</strong> TCT')
+            : 'No daily auto-post yet';
+        const lastWeekly = discordMeta.lastWeeklyPostWeek
+            ? ('Last weekly panel: <strong>' + discordMeta.lastWeeklyPostWeek + '</strong>')
+            : 'No weekly panel yet';
         const panelIdNote = discordMeta.panelMessageId
-            ? ('Panel message id: <code style="color:#aaa">' + String(discordMeta.panelMessageId).slice(0, 12) + '…</code>')
-            : 'Panel message: not created yet (first post will create it)';
+            ? ('Daily panel id: <code style="color:#aaa">' + String(discordMeta.panelMessageId).slice(0, 12) + '…</code>')
+            : 'Daily panel: not created yet';
+        const weeklyIdNote = discordMeta.weeklyPanelMessageId
+            ? ('Weekly panel id: <code style="color:#aaa">' + String(discordMeta.weeklyPanelMessageId).slice(0, 12) + '…</code>')
+            : 'Weekly panel: not created yet';
         const inputStyle = 'width:100%;padding:8px;background:#111;border:1px solid #555;color:#fff;border-radius:4px;font-size:12px;box-sizing:border-box;margin:4px 0 6px';
         return `<div class="tcm-section">
             <h4>Discord Reports</h4>
             <div class="tcm-peer-note" style="margin-bottom:8px">
-                Two optional webhooks (use one or both). Auto-run daily at <strong>18:00 TCT</strong> when
-                the companies page is open (or TornPDA keeps the script alive). Settings sync via <strong>Data Sync</strong> (JSONBin).
+                Optional webhooks. Daily auto-run at <strong>18:00 TCT</strong>; weekly panel on
+                <strong>Sundays 18:00 TCT</strong>. Settings sync via <strong>Data Sync</strong>.
+                Metrics history in JSONBin is limited to the last <strong>4 weeks</strong>.
             </div>
 
             <label><strong>Permanent log webhook</strong> <span style="color:#888;font-weight:normal">(append-only history)</span></label>
             <input type="text" id="tcm-discord-log-hook" placeholder="https://discord.com/api/webhooks/..." value="${logWh}" style="${inputStyle}">
-            <div class="tcm-peer-note" style="margin-bottom:10px">${logOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — posts a new message each run</span>'}</div>
+            <div class="tcm-peer-note" style="margin-bottom:10px">${logOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — posts a new message each daily run</span>'}</div>
 
-            <label><strong>Data panel webhook</strong> <span style="color:#888;font-weight:normal">(one live message that updates)</span></label>
+            <label><strong>Daily data panel webhook</strong> <span style="color:#888;font-weight:normal">(one live message that updates)</span></label>
             <input type="text" id="tcm-discord-panel-hook" placeholder="https://discord.com/api/webhooks/..." value="${panelWh}" style="${inputStyle}">
-            <div class="tcm-peer-note" style="margin-bottom:8px">
+            <div class="tcm-peer-note" style="margin-bottom:10px">
                 ${panelOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — edits the same message daily</span>'}
                 · ${panelIdNote}
             </div>
 
-            <div class="tcm-peer-note" style="margin-bottom:8px">${last}</div>
+            <label><strong>Weekly panel webhook</strong> <span style="color:#888;font-weight:normal">(week-over-week metrics + company changes)</span></label>
+            <input type="text" id="tcm-discord-weekly-hook" placeholder="https://discord.com/api/webhooks/..." value="${weeklyWh}" style="${inputStyle}">
+            <div class="tcm-peer-note" style="margin-bottom:8px">
+                ${weeklyOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — Sundays 18:00 TCT, edits one message</span>'}
+                · ${weeklyIdNote}
+            </div>
+
+            <div class="tcm-peer-note" style="margin-bottom:8px">${last} · ${lastWeekly}</div>
 
             <div style="margin:8px 0;line-height:1.8">
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-unused" ${o.unusedTrains ? 'checked' : ''}> Unused Trains</label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-metrics" ${o.dailyMetrics ? 'checked' : ''}> Daily Metrics <span style="color:#888">(income, environment, stock, efficiency)</span></label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-alerts" ${o.employeeAlerts ? 'checked' : ''}> Employee Alerts <span style="color:#888">(inactivity, unassigned, leaving, addiction, inefficiency)</span></label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-stars" ${o.starChange ? 'checked' : ''}> Star Up / Star Down</label>
-                <label style="display:block;cursor:pointer;margin-top:6px"><input type="checkbox" id="tcm-d-auto" ${o.autoPost !== false ? 'checked' : ''}> Auto-post at 18:00 TCT</label>
+                <label style="display:block;cursor:pointer;margin-top:6px"><input type="checkbox" id="tcm-d-auto" ${o.autoPost !== false ? 'checked' : ''}> Daily auto-post at 18:00 TCT</label>
+                <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-weekly" ${o.weeklyPanel !== false ? 'checked' : ''}> Weekly panel Sundays 18:00 TCT</label>
             </div>
             <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">
                 <button type="button" class="tcm-btn" id="tcm-discord-save">Save Discord Settings</button>
-                <button type="button" class="tcm-btn" id="tcm-discord-post">Post / Update Now</button>
-                <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-panel" title="Forget panel message id so the next run creates a new panel message">Reset Panel Message</button>
+                <button type="button" class="tcm-btn" id="tcm-discord-post">Post / Update Daily Now</button>
+                <button type="button" class="tcm-btn" id="tcm-discord-weekly-post">Post / Update Weekly Now</button>
+                <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-panel" title="Forget daily panel message id">Reset Daily Panel</button>
+                <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-weekly" title="Forget weekly panel message id">Reset Weekly Panel</button>
             </div>
             <div class="tcm-peer-note" style="margin-top:8px">
                 Create webhooks in Discord: Channel → Edit → Integrations → Webhooks.
-                Tip: use different channels for log vs panel. <strong>Data Sync</strong> (JSONBin) shares both URLs + panel message id with PDA.
+                Weekly panel lists metric deltas and staffing changes (roles, Manager/Trainer/Marketer, headcount, ad budget, rating).
             </div>
         </div>`;
     }
@@ -2833,13 +3104,15 @@
             dailyMetrics: chk('tcm-d-metrics'),
             employeeAlerts: chk('tcm-d-alerts'),
             starChange: chk('tcm-d-stars'),
-            autoPost: chk('tcm-d-auto')
+            autoPost: chk('tcm-d-auto'),
+            weeklyPanel: chk('tcm-d-weekly')
         };
     }
 
     function readDiscordWebhooksFromDom() {
         const logEl = document.getElementById('tcm-discord-log-hook');
         const panelEl = document.getElementById('tcm-discord-panel-hook');
+        const weeklyEl = document.getElementById('tcm-discord-weekly-hook');
         if (logEl) {
             discordLogWebhook = (logEl.value || '').trim();
             GM_setValue('tcmDiscordLogWebhook', discordLogWebhook);
@@ -2849,12 +3122,18 @@
             discordPanelWebhook = (panelEl.value || '').trim();
             GM_setValue('tcmDiscordPanelWebhook', discordPanelWebhook);
         }
+        if (weeklyEl) {
+            discordWeeklyWebhook = (weeklyEl.value || '').trim();
+            GM_setValue('tcmDiscordWeeklyWebhook', discordWeeklyWebhook);
+        }
     }
 
     function wireDiscordTabControls() {
         const saveBtn = document.getElementById('tcm-discord-save');
         const postBtn = document.getElementById('tcm-discord-post');
+        const weeklyBtn = document.getElementById('tcm-discord-weekly-post');
         const resetPanelBtn = document.getElementById('tcm-discord-reset-panel');
+        const resetWeeklyBtn = document.getElementById('tcm-discord-reset-weekly');
         if (saveBtn) {
             saveBtn.onclick = async () => {
                 readDiscordWebhooksFromDom();
@@ -2873,15 +3152,32 @@
             postBtn.onclick = async () => {
                 readDiscordWebhooksFromDom();
                 saveDiscordOpts(readDiscordOptsFromDom());
-                setStatus('Posting / updating Discord…');
+                setStatus('Posting / updating daily Discord…');
                 await runDiscordReports(true);
+            };
+        }
+        if (weeklyBtn) {
+            weeklyBtn.onclick = async () => {
+                readDiscordWebhooksFromDom();
+                saveDiscordOpts(readDiscordOptsFromDom());
+                setStatus('Posting / updating weekly panel…');
+                await runWeeklyDiscordPanel(true);
             };
         }
         if (resetPanelBtn) {
             resetPanelBtn.onclick = async () => {
                 discordMeta.panelMessageId = null;
                 saveDiscordMeta(discordMeta);
-                setStatus('Panel message id cleared — next post creates a new panel message');
+                setStatus('Daily panel message id cleared');
+                try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
+                if (companyData) render(companyData);
+            };
+        }
+        if (resetWeeklyBtn) {
+            resetWeeklyBtn.onclick = async () => {
+                discordMeta.weeklyPanelMessageId = null;
+                saveDiscordMeta(discordMeta);
+                setStatus('Weekly panel message id cleared');
                 try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
                 if (companyData) render(companyData);
             };
