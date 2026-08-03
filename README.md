@@ -3,7 +3,7 @@
 Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.7.1  
+**Version:** 3.7.2  
 **Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) (raw install via Tampermonkey)
 
 ---
@@ -38,8 +38,9 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 
 ### 10★ peer role-mix
 - Caches company IDs while you browse the **Job List**
-- Scrapes **public corp-info pages** for employee position text
+- Scrapes **public corp-info pages** for employee position text (other companies’ employee stats are not public via API)
 - **Refresh Peers** builds average staffing by role vs yours
+
 
 ### Discord reports
 - Dedicated **Discord** tab (webhook + checkboxes)
@@ -53,7 +54,9 @@ Discord **webhooks are write-only** — they cannot feed data back to PDA.
 | Channel | Purpose |
 |---------|---------|
 | **JSONBin.io** | Two-way store shared by web and PDA |
-| **Discord webhook** | Optional scheduled / manual reports |
+| **Discord webhook** | Optional notifications / channel log |
+
+See [Train sync setup](#train-sync-setup-web--pda) below.
 
 ---
 
@@ -77,26 +80,16 @@ Discord **webhooks are write-only** — they cannot feed data back to PDA.
 - **User:** `profile`, `job`, `basic`
 - **Company:** `profile`, `employees`, `stock`, `detailed`
 
-Use **Create Custom Key** in the panel to open Torn’s key form pre-filled with these selections.
+The **Create Custom Key** button pre-fills Torn’s key form with these selections.
 
-- Full employee stats and stock need a **Director** key on the company account.
-- Key is stored only in the browser (`GM_setValue`).
-
-Native **API v2** is preferred, with safe fallbacks.
+You must be the **Director** for full employee working stats, stock, and detailed company fields.
 
 ---
 
 ## Train sync setup (Web ↔ PDA)
 
-### Why not Discord alone?
-A Discord webhook can **post** messages. It cannot be **read** by the script.
-
-### JSONBin (required for two-way sync)
-
-JSONBin rejects a blank body (`Bin cannot be blank`). Use a real starter object.
-
 1. Create a free account at [jsonbin.io](https://jsonbin.io).
-2. **Create Bin** and paste this JSON:
+2. **Create Bin** — JSONBin rejects a blank body. Use this starter JSON:
 
 ```json
 {
@@ -120,44 +113,59 @@ JSONBin rejects a blank body (`Bin cannot be blank`). Use a real starter object.
 ```
 
 3. Name the bin (e.g. `CompanyManagerTrains`) and create it.
-4. Copy **Bin ID** and **Master Key**.
-5. In the script panel click **Sync** → paste → **Save Sync Settings**.
-6. Same Bin ID + Key on **TornPDA**.
-7. **Sync Now** (or **+Train** / Discord **Save** push automatically).
+4. Copy **Bin ID** + **Master Key** into the script **Sync** dialog (web and PDA).
+5. Save → **Sync Now**.
+
+Train logs and Discord settings merge both ways (higher train counts win; options/meta merge).
+
+---
+
+## Discord tab
+
+1. Create a webhook: Discord channel → Edit → Integrations → Webhooks.
+2. Paste URL on the **Discord** tab.
+3. Enable the reports you want.
+4. Optionally enable **Auto-post at 18:00 TCT**.
+5. **Save Discord Settings** (pushes to JSONBin if configured).
+6. **Post Now** sends immediately.
+
+Auto-post runs while the companies page is open (or TornPDA keeps the script alive) and only once per TCT day.
 
 ---
 
 ## Peer comparison workflow
 
-1. Open **Job List** for your company type.
-2. Open individual **corp info** pages.
-3. Toast confirms positions were scraped.
-4. **Companies** → **Peers** → **Refresh Peers**.
+1. Open [Job List](https://www.torn.com/joblist.php) for your company type.
+2. Click into individual **company corp-info** pages so positions can be scraped from public page text.
+3. Return to companies dashboard → **Peers** tab → **Refresh Peers**.
 
 ---
 
-## Privacy / ToS notes
+## Privacy
 
-| Item | Behaviour |
-|------|-----------|
-| Torn API key | Local browser storage only |
-| Train log / Discord settings | Local + optional JSONBin + optional Discord post |
-| Peer scrapes | Public Torn pages you open |
-
-Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rules.
+- API key, webhook URL, JSONBin credentials, and train log are stored only in the browser (Tampermonkey / PDA storage).
+- JSONBin holds train counts and Discord settings you choose to sync — treat the Master Key as a secret.
+- No data is sent anywhere else except Torn API, Discord (if configured), and JSONBin (if configured).
 
 ---
 
-## Changelog (recent)
+## Changelog
+
+### 3.7.2
+- Streamlined internals: unified `loadJson` / `getEmpList` / `showToast` helpers
+- Removed redundant `posStr` / `gmXhr` wrappers
+- Cleaner peer filter and Discord options reader
+- No user-facing behaviour changes
 
 ### 3.7.1
-- Streamlined HTTP helpers (`xhrJson`), peer fetch URL list, position-name cache
-- Fixed JSONBin pull structure
+- Streamlined HTTP helpers (`xhrJson` + `rawGet`)
+- Fixed train-log pull nesting / Discord tab wiring
+- JSONBin starter payload guidance
 
 ### 3.7.0
-- Discord tab with selectable report types
-- Auto-post at 18:00 TCT
+- Discord tab with report checkboxes and 18:00 TCT auto-post
 - Discord settings synced via JSONBin
+- Tabs: Training / Employees / Peers / Discord
 
-### 3.6.x
-- JSONBin train sync, starter JSON fix, tabs, Smart Training, peer scrape
+### Earlier
+- Smart Training, peer scrape, API v2, director detection, custom key helper
