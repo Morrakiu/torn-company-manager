@@ -3,7 +3,7 @@
 Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.6.0  
+**Version:** 3.7.1  
 **Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) (raw install via Tampermonkey)
 
 ---
@@ -23,6 +23,7 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 | **Training** | Smart Training queue — who to train first, fair share by tenure, local train log |
 | **Employees** | Recommendations + best-position advisor (work-stat efficiency per role) |
 | **Peers** | Compare your role mix to **10★** companies of the same type |
+| **Discord** | Webhook reports + 18:00 TCT auto-post |
 
 ### Smart Training
 - Estimates trains/day from star rating (+ trainer if staffed)
@@ -37,8 +38,14 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 
 ### 10★ peer role-mix
 - Caches company IDs while you browse the **Job List**
-- Scrapes **public corp-info pages** for employee position text (other companies’ employee stats are not public via API)
+- Scrapes **public corp-info pages** for employee position text
 - **Refresh Peers** builds average staffing by role vs yours
+
+### Discord reports
+- Dedicated **Discord** tab (webhook + checkboxes)
+- Optional daily auto-post at **18:00 TCT** while the companies page is open
+- Report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down
+- Webhook URL and options sync through **JSONBin** with the train log
 
 ### Train sync (Web ↔ PDA)
 Discord **webhooks are write-only** — they cannot feed data back to PDA.
@@ -46,9 +53,7 @@ Discord **webhooks are write-only** — they cannot feed data back to PDA.
 | Channel | Purpose |
 |---------|---------|
 | **JSONBin.io** | Two-way store shared by web and PDA |
-| **Discord webhook** | Optional notifications / channel log |
-
-See [Train sync setup](#train-sync-setup-web--pda) below.
+| **Discord webhook** | Optional scheduled / manual reports |
 
 ---
 
@@ -84,36 +89,50 @@ Native **API v2** is preferred, with safe fallbacks.
 ## Train sync setup (Web ↔ PDA)
 
 ### Why not Discord alone?
-A Discord webhook can **post** messages. It cannot be **read** by the script. PDA and browser would never share the same train counts from a webhook alone.
+A Discord webhook can **post** messages. It cannot be **read** by the script.
 
 ### JSONBin (required for two-way sync)
 
+JSONBin rejects a blank body (`Bin cannot be blank`). Use a real starter object.
+
 1. Create a free account at [jsonbin.io](https://jsonbin.io).
-2. Create a bin with body `{}`.
-3. Copy **Bin ID** and **Master Key**.
-4. In the script panel click **Sync**.
-5. Paste Bin ID + Master Key → **Save Sync Settings**.
-6. Repeat with the **same** Bin ID and Master Key on **TornPDA**.
-7. Click **Sync Now** (or just use **+Train** — it pushes automatically).
+2. **Create Bin** and paste this JSON:
 
-On company load the script **pulls**, **merges** (higher train counts win), and **pushes** back.
+```json
+{
+  "version": 2,
+  "updated": 0,
+  "company_id": null,
+  "company_name": null,
+  "trains": {},
+  "discord": {
+    "webhook": "",
+    "opts": {
+      "unusedTrains": false,
+      "dailyMetrics": false,
+      "employeeAlerts": false,
+      "starChange": false,
+      "autoPost": true
+    },
+    "meta": {}
+  }
+}
+```
 
-### Discord webhook (optional)
-
-1. Server settings → Integrations → Webhooks → New webhook.
-2. Paste the URL under **Sync**.
-3. Each **+Train** (and full log push) can post an embed with a train snapshot.
+3. Name the bin (e.g. `CompanyManagerTrains`) and create it.
+4. Copy **Bin ID** and **Master Key**.
+5. In the script panel click **Sync** → paste → **Save Sync Settings**.
+6. Same Bin ID + Key on **TornPDA**.
+7. **Sync Now** (or **+Train** / Discord **Save** push automatically).
 
 ---
 
 ## Peer comparison workflow
 
 1. Open **Job List** for your company type.
-2. Open individual **corp info** pages (employee positions must be visible on the page).
-3. A toast confirms positions were scraped.
-4. Back on **Companies** → **Peers** tab → **Refresh Peers**.
-
-Position averages use scraped public text, not private API employee data.
+2. Open individual **corp info** pages.
+3. Toast confirms positions were scraped.
+4. **Companies** → **Peers** → **Refresh Peers**.
 
 ---
 
@@ -122,47 +141,23 @@ Position averages use scraped public text, not private API employee data.
 | Item | Behaviour |
 |------|-----------|
 | Torn API key | Local browser storage only |
-| Train log | Local + optional JSONBin + optional Discord post |
+| Train log / Discord settings | Local + optional JSONBin + optional Discord post |
 | Peer scrapes | Public Torn pages you open |
-| Data sharing | None, unless you configure JSONBin/Discord |
 
-Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rules. Do not share API keys.
-
----
-
-## Files
-
-| File | Description |
-|------|-------------|
-| `Torn_Company_Manager.user.js` | Main userscript |
-| `README.md` | This document |
-| `INSTALL.md` | Short install notes |
+Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rules.
 
 ---
 
 ## Changelog (recent)
 
-### 3.6.0
-- Train log sync via JSONBin (web ↔ PDA)
-- Optional Discord webhook notifications
-- **Sync** settings panel
+### 3.7.1
+- Streamlined HTTP helpers (`xhrJson`), peer fetch URL list, position-name cache
+- Fixed JSONBin pull structure
 
-### 3.5.x
-- Tabs: Training / Employees / Peers
-- Recommendations moved to Employees tab
-- **Refresh Peers** moved into Peers tab
+### 3.7.0
+- Discord tab with selectable report types
+- Auto-post at 18:00 TCT
+- Discord settings synced via JSONBin
 
-### 3.4.0
-- Smart Training advisor
-- Stock days, richer employee columns
-
-### 3.3.0
-- Peer role-mix from public page scrape
-
-### 3.2.x
-- Peer ID cache from job list
-- Light-grey table text readability
-
-### 3.1.x
-- API v2, director checks, Create Custom Key
-- Generic (all company types), companies pages only
+### 3.6.x
+- JSONBin train sync, starter JSON fix, tabs, Smart Training, peer scrape
