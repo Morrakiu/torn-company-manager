@@ -4,7 +4,7 @@ Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https:
 
 **Author:** Morrakiu  
 **Version:** 3.9.0  
-**Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) (raw install via Tampermonkey)
+**Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — full script on this branch (raw install via Tampermonkey)
 
 ---
 
@@ -73,7 +73,8 @@ See [Data Sync setup](#data-sync-setup-web--pda) below.
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) (or use TornPDA script support).
-2. Open [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) and install.
+2. Open the **raw** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) from this repository and choose **Install** in Tampermonkey.  
+   The full **v3.9.0** userscript lives on the `main` branch of this repo.
 3. Visit [companies.php](https://www.torn.com/companies.php).
 4. Enter a Torn API key (or use **Create Custom Key**).
 
@@ -180,7 +181,7 @@ Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rule
 
 | File | Description |
 |------|-------------|
-| `Torn_Company_Manager.user.js` | Main userscript (full build may need to be installed from project artifact if GitHub hosts a size-limited stub) |
+| `Torn_Company_Manager.user.js` | **Full** v3.9.0 userscript (main branch) |
 | `README.md` | This document |
 | `INSTALL.md` | Short install notes |
 
