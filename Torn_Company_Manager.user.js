@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Manager
 // @namespace    https://torn.com/
-// @version      3.10.1
+// @version      3.10.3
 // @description  Director dashboard: weekly metrics panel, smart training, Discord webhooks, peers, JSONBin Data Sync, API v2.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
@@ -1391,6 +1391,34 @@
         return isoWeekKey(target);
     }
 
+    /** Oldest → newest list of up to n recent ISO week keys ending at current */
+    function recentIsoWeekKeys(n) {
+        const out = [];
+        let k = isoWeekKey();
+        const limit = Math.max(1, n || METRICS_KEEP_WEEKS);
+        for (let i = 0; i < limit && k; i++) {
+            out.push(k);
+            k = prevIsoWeekKey(k);
+        }
+        return out.reverse();
+    }
+
+    /** True when UTC/TCT date is a Sunday with day-of-month 1–7 */
+    function isFirstSundayOfMonth(date) {
+        const d = date ? new Date(date) : new Date();
+        if (d.getUTCDay() !== 0) return false;
+        return d.getUTCDate() <= 7;
+    }
+
+    function getRecentWeekSnapshots(n) {
+        const log = loadMetricsLog();
+        const weeks = (log && log.weeks) || {};
+        return recentIsoWeekKeys(n).map(key => ({
+            key: key,
+            snap: weeks[key] || null
+        }));
+    }
+
     function numOrNull(v) {
         if (v == null || v === '') return null;
         const n = Number(v);
@@ -1573,13 +1601,128 @@
             </tr>`;
         });
         html += `</tbody></table>`;
+        html += renderFourWeekChartHtml();
         if (!prev) {
             html += `<div class="tcm-peer-note">First week of history — comparison appears after next week's snapshots.</div>`;
         } else {
-            html += `<div class="tcm-peer-note">Snapshots refresh when company data loads. History kept for ${METRICS_KEEP_WEEKS} weeks (synced via Data Sync).</div>`;
+            html += `<div class="tcm-peer-note">Snapshots refresh when company data loads. History kept for ${METRICS_KEEP_WEEKS} weeks (synced via Data Sync). 4-week Discord panel updates on the <strong>first Sunday of each month</strong> (daily panel channel + permanent log).</div>`;
         }
         html += `</div>`;
         return html;
+    }
+
+    function barUnit(val, min, max, width) {
+        const w = width || 10;
+        if (val == null || isNaN(Number(val))) return '·'.repeat(w);
+        const lo = min == null ? 0 : Number(min);
+        const hi = max == null ? 100 : Number(max);
+        const span = hi - lo || 1;
+        let t = (Number(val) - lo) / span;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        const filled = Math.round(t * w);
+        return '█'.repeat(filled) + '░'.repeat(w - filled);
+    }
+
+    function seriesMinMax(series) {
+        const nums = series.filter(v => v != null && !isNaN(Number(v))).map(Number);
+        if (!nums.length) return { min: 0, max: 100 };
+        let min = Math.min.apply(null, nums);
+        let max = Math.max.apply(null, nums);
+        if (min === max) {
+            min = Math.max(0, min - 5);
+            max = max + 5;
+        } else {
+            const pad = (max - min) * 0.08;
+            min = min - pad;
+            max = max + pad;
+        }
+        return { min: min, max: max };
+    }
+
+    function buildFourWeekChartLines() {
+        const seriesDefs = [
+            { key: 'efficiency', label: 'Efficiency', suffix: '%' },
+            { key: 'environment', label: 'Environment', suffix: '' },
+            { key: 'avgEffectiveness', label: 'Avg emp. eff.', suffix: '' },
+            { key: 'popularity', label: 'Popularity', suffix: '%' }
+        ];
+        const recent = getRecentWeekSnapshots(METRICS_KEEP_WEEKS);
+        const weekLabels = recent.map(r => {
+            const m = String(r.key).match(/W(\d{1,2})$/);
+            return m ? ('W' + m[1]) : r.key;
+        });
+        const lines = [];
+        lines.push('Weeks: ' + weekLabels.join(' → '));
+        seriesDefs.forEach(def => {
+            const vals = recent.map(r => (r.snap && r.snap[def.key] != null ? Number(r.snap[def.key]) : null));
+            const mm = seriesMinMax(vals);
+            const parts = vals.map(v => {
+                const bar = barUnit(v, mm.min, mm.max, 8);
+                const num = v == null ? '—' : (Math.round(v * 10) / 10) + def.suffix;
+                return bar + ' ' + num;
+            });
+            lines.push('**' + def.label + '**');
+            // one line per week keeps Discord monospace readable
+            recent.forEach((r, i) => {
+                const v = vals[i];
+                const bar = barUnit(v, mm.min, mm.max, 10);
+                const num = v == null ? '—' : (Math.round(v * 10) / 10) + def.suffix;
+                lines.push('`' + weekLabels[i] + ' ' + bar + ' ' + num + '`');
+            });
+        });
+        return lines;
+    }
+
+    function renderFourWeekChartHtml() {
+        const recent = getRecentWeekSnapshots(METRICS_KEEP_WEEKS);
+        const hasAny = recent.some(r => r.snap);
+        if (!hasAny) {
+            return `<div class="tcm-peer-note" style="margin-top:8px">4-week chart: no history yet.</div>`;
+        }
+        const metrics = [
+            { key: 'efficiency', label: 'Eff%', suffix: '%' },
+            { key: 'environment', label: 'Env', suffix: '' },
+            { key: 'avgEffectiveness', label: 'EmpEff', suffix: '' },
+            { key: 'popularity', label: 'Pop%', suffix: '%' }
+        ];
+        let html = `<div style="margin-top:10px"><strong>4-week trend</strong>
+            <span style="color:#888;font-weight:normal"> (Discord: first Sunday → daily panel + permanent log)</span></div>`;
+        html += `<table class="tcm-peer"><thead><tr><th>Week</th>`;
+        metrics.forEach(m => { html += `<th>${m.label}</th>`; });
+        html += `</tr></thead><tbody>`;
+        recent.forEach(r => {
+            const short = (String(r.key).match(/W(\d{1,2})$/) || [])[1];
+            html += `<tr><td>${short ? ('W' + short) : r.key}${r.key === isoWeekKey() ? ' *' : ''}</td>`;
+            metrics.forEach(m => {
+                const v = r.snap && r.snap[m.key];
+                html += `<td>${v != null ? v + m.suffix : '—'}</td>`;
+            });
+            html += `</tr>`;
+        });
+        html += `</tbody></table>`;
+        // Mini bars for efficiency
+        const effVals = recent.map(r => (r.snap && r.snap.efficiency != null ? Number(r.snap.efficiency) : null));
+        const mm = seriesMinMax(effVals);
+        html += `<div style="margin-top:6px;font-family:monospace;font-size:11px;color:#ccc;line-height:1.5">`;
+        recent.forEach((r, i) => {
+            const short = (String(r.key).match(/W(\d{1,2})$/) || [])[1] || r.key;
+            html += `<div>W${short} ${barUnit(effVals[i], mm.min, mm.max, 12)} ${effVals[i] != null ? effVals[i] + '%' : '—'} eff</div>`;
+        });
+        html += `</div>`;
+        return html;
+    }
+
+    function buildFourWeekChartEmbed() {
+        const lines = buildFourWeekChartLines();
+        return {
+            title: '4-week metrics chart',
+            description: 'Monthly panel (first Sunday) · last ' + METRICS_KEEP_WEEKS + ' ISO weeks\n' +
+                'Lives next to the daily data panel · also archived to permanent log\n\n' +
+                lines.join('\n').slice(0, 3600),
+            color: 0x9b7eed,
+            timestamp: new Date().toISOString()
+        };
     }
 
     function mergeMetricsLogs(local, remote) {
@@ -1688,6 +1831,156 @@
                 timestamp: new Date().toISOString()
             }
         ];
+    }
+
+    function currentYearMonthTCT() {
+        const d = new Date();
+        return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
+    }
+
+    async function shouldPostFourWeekPanel(yearMonth, force) {
+        if (force) return true;
+        if (!isFirstSundayOfMonth()) return false;
+        if (jsonbinId && jsonbinKey) {
+            try { await pullTrainLogRemote(); } catch (e) { /* local */ }
+        }
+        if (discordMeta.lastFourWeekChartMonth === yearMonth) return false;
+        const myId = getClientId();
+        const now = Date.now();
+        if (
+            discordMeta.fourWeekClaimMonth === yearMonth &&
+            discordMeta.fourWeekClaimId &&
+            discordMeta.fourWeekClaimId !== myId &&
+            (now - (Number(discordMeta.fourWeekClaimTs) || 0)) < 3 * 60 * 1000
+        ) {
+            return false;
+        }
+        discordMeta.fourWeekClaimMonth = yearMonth;
+        discordMeta.fourWeekClaimId = myId;
+        discordMeta.fourWeekClaimTs = now;
+        saveDiscordMeta(discordMeta);
+        if (jsonbinId && jsonbinKey) {
+            try {
+                await pushTrainLogRemote(loadTrainLog());
+                await sleep(900);
+                try { await pullTrainLogRemote(); } catch (e) { /* ignore */ }
+                if (discordMeta.lastFourWeekChartMonth === yearMonth) return false;
+                if (
+                    discordMeta.fourWeekClaimMonth === yearMonth &&
+                    discordMeta.fourWeekClaimId &&
+                    discordMeta.fourWeekClaimId !== myId
+                ) {
+                    return false;
+                }
+            } catch (e) { /* allow local */ }
+        }
+        return true;
+    }
+
+    /**
+     * 4-week trend panel lives on the daily data-panel webhook (edit-in-place).
+     * Updated only on the first Sunday of each month; also appended to permanent log.
+     */
+    async function runFourWeekPanel(force) {
+        const hasPanel = isValidDiscordWebhook(discordPanelWebhook);
+        const hasLog = isValidDiscordWebhook(discordLogWebhook);
+        if (!hasPanel && !hasLog) {
+            if (force) setStatus('Set the daily data panel and/or permanent log webhook for the 4-week chart', true);
+            return { ok: false, reason: 'no_webhook' };
+        }
+        if (!force && !isFirstSundayOfMonth()) {
+            if (force) { /* unreachable */ }
+            return { ok: false, reason: 'not_first_sunday' };
+        }
+        if (force && !isFirstSundayOfMonth()) {
+            // Allow manual force any day for testing/preview
+        } else if (!force && !isFirstSundayOfMonth()) {
+            return { ok: false, reason: 'not_first_sunday' };
+        }
+
+        if (companyData) {
+            try {
+                recordMetricsSnapshot(
+                    companyData.company || companyData.profile || {},
+                    companyData
+                );
+            } catch (e) { /* ignore */ }
+        }
+
+        const ym = currentYearMonthTCT();
+        const may = await shouldPostFourWeekPanel(ym, force);
+        if (!may) {
+            if (force) setStatus('4-week panel already posted this month (or claimed by another device)');
+            else console.log('[TCM] 4-week panel skipped for', ym);
+            return { ok: false, reason: 'already' };
+        }
+
+        const embeds = cleanEmbeds([buildFourWeekChartEmbed()]);
+        const content = '**4-week metrics panel** · **' + ym + '**' +
+            (force ? ' (manual)' : ' · first Sunday 18:00 TCT');
+        const body = {
+            username: 'Company Manager',
+            content: content,
+            embeds: embeds
+        };
+
+        const results = { panel: false, log: false };
+        const errors = [];
+
+        // Persistent panel message on the daily data-panel webhook
+        if (hasPanel) {
+            try {
+                const existingId = discordMeta.fourWeekPanelMessageId || null;
+                let posted = false;
+                if (existingId) {
+                    try {
+                        await editWebhookMessage(discordPanelWebhook, existingId, body);
+                        posted = true;
+                    } catch (e) {
+                        console.warn('[TCM] 4-week panel edit failed', e && e.message);
+                        discordMeta.fourWeekPanelMessageId = null;
+                    }
+                }
+                if (!posted) {
+                    const res = await postToWebhook(discordPanelWebhook, body, true);
+                    const msg = res && res.data;
+                    const newId = msg && (msg.id || (msg.message && msg.message.id));
+                    if (newId) discordMeta.fourWeekPanelMessageId = String(newId);
+                }
+                results.panel = true;
+            } catch (e) {
+                errors.push('4w panel: ' + (e.message || e));
+            }
+        }
+
+        // Append-only copy on permanent log
+        if (hasLog) {
+            try {
+                await postToWebhook(discordLogWebhook, {
+                    username: 'Company Manager',
+                    content: content + ' · permanent log',
+                    embeds: embeds
+                }, false);
+                results.log = true;
+            } catch (e) {
+                errors.push('4w log: ' + (e.message || e));
+            }
+        }
+
+        discordMeta.lastFourWeekChartMonth = ym;
+        discordMeta.lastFourWeekChartTs = Date.now();
+        saveDiscordMeta(discordMeta);
+        try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
+
+        const parts = [];
+        if (results.panel) parts.push('daily panel (4-week message)');
+        if (results.log) parts.push('permanent log');
+        if (parts.length) {
+            setStatus('4-week chart: ' + parts.join(' + '));
+            return { ok: true, results: results };
+        }
+        setStatus('4-week chart failed: ' + (errors.join('; ') || 'unknown'), true);
+        return { ok: false, reason: errors.join('; ') || 'error' };
     }
 
     function fmtWeekPair(cur, prev, suffix) {
@@ -2271,7 +2564,8 @@
         const embeds = cleanEmbeds(buildWeeklyPanelEmbeds());
         const body = {
             username: 'Company Manager',
-            content: '**Weekly metrics panel** · **' + weekKey + '**' + (force ? ' (manual)' : ' · Sunday 18:00 TCT'),
+            content: '**Weekly metrics panel** · **' + weekKey + '**' +
+                (force ? ' (manual)' : ' · Sunday 18:00 TCT'),
             embeds: embeds
         };
         try {
@@ -2296,7 +2590,10 @@
             discordMeta.lastWeeklyPostTs = Date.now();
             saveDiscordMeta(discordMeta);
             try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
-            setStatus('Weekly panel ' + (posted || discordMeta.weeklyPanelMessageId ? 'updated' : 'posted') + ' · ' + weekKey);
+            setStatus(
+                'Weekly panel ' + (posted || discordMeta.weeklyPanelMessageId ? 'updated' : 'posted') +
+                ' · ' + weekKey
+            );
             return { ok: true };
         } catch (e) {
             setStatus('Weekly panel failed: ' + (e.message || e), true);
@@ -2326,6 +2623,19 @@
                             }
                         }
                         await runWeeklyDiscordPanel(false);
+                    }
+                }
+
+                // First Sunday of month: 4-week chart on daily panel webhook + permanent log
+                if (isFirstSundayOfMonth()) {
+                    const ym = currentYearMonthTCT();
+                    if (discordMeta.lastFourWeekChartMonth !== ym) {
+                        if (!companyData || (Date.now() - lastFetch > 10 * 60 * 1000)) {
+                            if (apiKey) {
+                                try { await fetchAll(true); } catch (e) { /* stale ok */ }
+                            }
+                        }
+                        await runFourWeekPanel(false);
                     }
                 }
 
@@ -3043,6 +3353,12 @@
         const panelIdNote = discordMeta.panelMessageId
             ? ('Daily panel id: <code style="color:#aaa">' + String(discordMeta.panelMessageId).slice(0, 12) + '…</code>')
             : 'Daily panel: not created yet';
+        const fourWeekIdNote = discordMeta.fourWeekPanelMessageId
+            ? ('4-week panel id: <code style="color:#aaa">' + String(discordMeta.fourWeekPanelMessageId).slice(0, 12) + '…</code>')
+            : '4-week panel: not created yet';
+        const lastFourWeek = discordMeta.lastFourWeekChartMonth
+            ? ('Last 4-week panel: <strong>' + discordMeta.lastFourWeekChartMonth + '</strong>')
+            : 'No 4-week panel yet';
         const weeklyIdNote = discordMeta.weeklyPanelMessageId
             ? ('Weekly panel id: <code style="color:#aaa">' + String(discordMeta.weeklyPanelMessageId).slice(0, 12) + '…</code>')
             : 'Weekly panel: not created yet';
@@ -3051,19 +3367,20 @@
             <h4>Discord Reports</h4>
             <div class="tcm-peer-note" style="margin-bottom:8px">
                 Optional webhooks. Daily auto-run at <strong>18:00 TCT</strong>; weekly panel on
-                <strong>Sundays 18:00 TCT</strong>. Settings sync via <strong>Data Sync</strong>.
+                <strong>Sundays 18:00 TCT</strong>. <strong>4-week panel</strong> updates on the
+                <strong>first Sunday of each month</strong> (same channel as the daily panel + permanent log).
                 Metrics history in JSONBin is limited to the last <strong>4 weeks</strong>.
             </div>
 
             <label><strong>Permanent log webhook</strong> <span style="color:#888;font-weight:normal">(append-only history)</span></label>
             <input type="text" id="tcm-discord-log-hook" placeholder="https://discord.com/api/webhooks/..." value="${logWh}" style="${inputStyle}">
-            <div class="tcm-peer-note" style="margin-bottom:10px">${logOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — posts a new message each daily run</span>'}</div>
+            <div class="tcm-peer-note" style="margin-bottom:10px">${logOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — daily reports + first-Sunday 4-week archive</span>'}</div>
 
-            <label><strong>Daily data panel webhook</strong> <span style="color:#888;font-weight:normal">(one live message that updates)</span></label>
+            <label><strong>Daily data panel webhook</strong> <span style="color:#888;font-weight:normal">(live daily message + monthly 4-week message)</span></label>
             <input type="text" id="tcm-discord-panel-hook" placeholder="https://discord.com/api/webhooks/..." value="${panelWh}" style="${inputStyle}">
             <div class="tcm-peer-note" style="margin-bottom:10px">
-                ${panelOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — edits the same message daily</span>'}
-                · ${panelIdNote}
+                ${panelOk ? '<span class="tcm-good">Valid</span>' : '<span class="tcm-warn">Optional — daily message + separate 4-week message</span>'}
+                · ${panelIdNote} · ${fourWeekIdNote}
             </div>
 
             <label><strong>Weekly panel webhook</strong> <span style="color:#888;font-weight:normal">(week-over-week metrics + company changes)</span></label>
@@ -3073,7 +3390,7 @@
                 · ${weeklyIdNote}
             </div>
 
-            <div class="tcm-peer-note" style="margin-bottom:8px">${last} · ${lastWeekly}</div>
+            <div class="tcm-peer-note" style="margin-bottom:8px">${last} · ${lastWeekly} · ${lastFourWeek}</div>
 
             <div style="margin:8px 0;line-height:1.8">
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-unused" ${o.unusedTrains ? 'checked' : ''}> Unused Trains</label>
@@ -3087,12 +3404,16 @@
                 <button type="button" class="tcm-btn" id="tcm-discord-save">Save Discord Settings</button>
                 <button type="button" class="tcm-btn" id="tcm-discord-post">Post / Update Daily Now</button>
                 <button type="button" class="tcm-btn" id="tcm-discord-weekly-post">Post / Update Weekly Now</button>
+                <button type="button" class="tcm-btn" id="tcm-discord-fourweek-post">Post / Update 4-Week Now</button>
                 <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-panel" title="Forget daily panel message id">Reset Daily Panel</button>
+                <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-fourweek" title="Forget 4-week panel message id">Reset 4-Week Panel</button>
                 <button type="button" class="tcm-btn secondary" id="tcm-discord-reset-weekly" title="Forget weekly panel message id">Reset Weekly Panel</button>
             </div>
             <div class="tcm-peer-note" style="margin-top:8px">
                 Create webhooks in Discord: Channel → Edit → Integrations → Webhooks.
-                Weekly panel lists metric deltas and staffing changes (roles, Manager/Trainer/Marketer, headcount, ad budget, rating).
+                Weekly panel lists metric deltas and staffing changes.
+                On the <strong>first Sunday of each month</strong>, a separate <strong>4-week trend</strong> message is updated on the
+                <strong>daily data panel</strong> webhook and also appended to the <strong>permanent log</strong> (if set).
             </div>
         </div>`;
     }
@@ -3132,7 +3453,9 @@
         const saveBtn = document.getElementById('tcm-discord-save');
         const postBtn = document.getElementById('tcm-discord-post');
         const weeklyBtn = document.getElementById('tcm-discord-weekly-post');
+        const fourWeekBtn = document.getElementById('tcm-discord-fourweek-post');
         const resetPanelBtn = document.getElementById('tcm-discord-reset-panel');
+        const resetFourWeekBtn = document.getElementById('tcm-discord-reset-fourweek');
         const resetWeeklyBtn = document.getElementById('tcm-discord-reset-weekly');
         if (saveBtn) {
             saveBtn.onclick = async () => {
@@ -3164,11 +3487,28 @@
                 await runWeeklyDiscordPanel(true);
             };
         }
+        if (fourWeekBtn) {
+            fourWeekBtn.onclick = async () => {
+                readDiscordWebhooksFromDom();
+                saveDiscordOpts(readDiscordOptsFromDom());
+                setStatus('Posting / updating 4-week panel…');
+                await runFourWeekPanel(true);
+            };
+        }
         if (resetPanelBtn) {
             resetPanelBtn.onclick = async () => {
                 discordMeta.panelMessageId = null;
                 saveDiscordMeta(discordMeta);
                 setStatus('Daily panel message id cleared');
+                try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
+                if (companyData) render(companyData);
+            };
+        }
+        if (resetFourWeekBtn) {
+            resetFourWeekBtn.onclick = async () => {
+                discordMeta.fourWeekPanelMessageId = null;
+                saveDiscordMeta(discordMeta);
+                setStatus('4-week panel message id cleared');
                 try { await pushTrainLogRemote(loadTrainLog()); } catch (e) { /* ignore */ }
                 if (companyData) render(companyData);
             };
