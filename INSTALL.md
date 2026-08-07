@@ -2,7 +2,7 @@
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) (or TornPDA script support).
 2. Open the **raw** script on GitHub: [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) and choose **Install**.  
-   The **complete v3.11.1** userscript is on the `main` branch of this repository (not a stub).
+   The **complete v3.11.2** userscript is on the `main` branch of this repository (not a stub).
 3. Go to https://www.torn.com/companies.php
 4. Enter your API key (or **Create Custom Key**).
 5. Optional: **Data Sync** → configure JSONBin for web ↔ PDA  
@@ -12,4 +12,4 @@
 
 Requires a Director key for full employee stats and stock.
 
-**Version:** 3.11.1 · Author: Morrakiu
+**Version:** 3.11.2 · Author: Morrakiu

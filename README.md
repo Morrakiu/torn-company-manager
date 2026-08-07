@@ -3,8 +3,8 @@
 Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.11.1  
-**Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — **full v3.11.1** userscript on `main` (raw install via Tampermonkey)
+**Version:** 3.11.2  
+**Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — **full v3.11.2** userscript on `main` (raw install via Tampermonkey)
 
 ---
 
@@ -78,7 +78,7 @@ See [Data Sync setup](#data-sync-setup-web--pda) below.
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) (or use TornPDA script support).
 2. Open the **raw** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) from this repository and choose **Install** in Tampermonkey.  
-   The full **v3.11.1** userscript is on the `main` branch of this repo.
+   The full **v3.11.2** userscript is on the `main` branch of this repo.
 3. Visit [companies.php](https://www.torn.com/companies.php).
 4. Enter a Torn API key (or use **Create Custom Key**).
 
@@ -176,13 +176,17 @@ Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rule
 
 | File | Description |
 |------|-------------|
-| `Torn_Company_Manager.user.js` | **Full** v3.11.1 userscript on `main` (install from raw file) |
+| `Torn_Company_Manager.user.js` | **Full** v3.11.2 userscript on `main` (install from raw file) |
 | `README.md` | This document |
 | `INSTALL.md` | Short install notes |
 
 ---
 
 ## Changelog
+
+### 3.11.2
+- Streamlined internals: parallel company API selections, concurrent peer loads (pool of 4)
+- Shared helpers (`companyRoster`, `empStats`, `mapPool`, leaner `loadJson`) — same features
 
 ### 3.11.1
 - Mobile / PDA layout: panel fits narrow viewports, safe-area insets, scrollable body
