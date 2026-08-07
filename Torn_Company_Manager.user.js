@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Manager
 // @namespace    https://torn.com/
-// @version      3.11.1
+// @version      3.11.2
 // @description  Director dashboard: stock balance, finance, EE breakdown, train modes, income day quality, Discord, Data Sync.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
@@ -101,6 +101,312 @@
         if (discordMeta.lastLogPostDateTCT === dateStr) return false;
         // Back-compat: older builds only set lastPostDateTCT
         if (discordMeta.lastLogPostDateTCT == null && discordMeta.lastPostDateTCT === dateStr) return false;
+
+        // Another device holds an active claim
+        if (
+            discordMeta.logClaimDate === dateStr &&
+            discordMeta.logClaimId &&
+            discordMeta.logClaimId !== myId &&
+            (now - (Number(discordMeta.logClaimTs) || 0)) < CLAIM_MS
+        ) {
+            return false;
+        }
+
+        // Claim the slot
+        discordMeta.logClaimDate = dateStr;
+        discordMeta.logClaimId = myId;
+        discordMeta.logClaimTs = now;
+        saveDiscordMeta(discordMeta);
+
+        if (jsonbinId && jsonbinKey) {
+            try {
+                await pushTrainLogRemote(loadTrainLog());
+                // Settle race: last writer of claim wins
+                await sleep(900);
+                try { await pullTrainLogRemote(); } catch (e) { /* ignore */ }
+                if (discordMeta.lastLogPostDateTCT === dateStr) return false;
+                if (discordMeta.logClaimDate === dateStr && discordMeta.logClaimId && discordMeta.logClaimId !== myId) {
+                    return false;
+                }
+            } catch (e) {
+                console.warn('[TCM] log claim push failed', e);
+                // Still allow local post if we cannot coordinate
+            }
+        }
+        return true;
+    }
+
+    function markDailyLogPosted(dateStr) {
+        discordMeta.lastLogPostDateTCT = dateStr;
+        discordMeta.lastPostDateTCT = dateStr;
+        discordMeta.lastPostTs = Date.now();
+        discordMeta.logClaimDate = dateStr;
+        discordMeta.logClaimId = getClientId();
+        discordMeta.logClaimTs = Date.now();
+        saveDiscordMeta(discordMeta);
+    }
+
+    function loadJson(key, fallback) {
+        const fb = fallback !== undefined ? fallback : {};
+        try {
+            const raw = GM_getValue(key, null);
+            if (raw == null || raw === '') return fb;
+            const parsed = JSON.parse(raw);
+            return parsed != null ? parsed : fb;
+        } catch (e) {
+            return fb;
+        }
+    }
+
+    /** Run async work over items with a concurrency limit (Torn rate-friendly). */
+    async function mapPool(items, limit, fn) {
+        const list = items || [];
+        const results = new Array(list.length);
+        let next = 0;
+        const workers = Math.min(Math.max(1, limit || 1), list.length || 1);
+        async function worker() {
+            while (next < list.length) {
+                const idx = next++;
+                try {
+                    results[idx] = { ok: true, value: await fn(list[idx], idx) };
+                } catch (err) {
+                    results[idx] = { ok: false, error: err };
+                }
+            }
+        }
+        await Promise.all(Array.from({ length: workers }, () => worker()));
+        return results;
+    }
+
+    /** Employees object/array from company payload or bare map */
+    function companyRoster(data) {
+        if (!data) return {};
+        return data.company_employees || data.employees ||
+            (data.company && (data.company.employees || data.company.company_employees)) ||
+            {};
+    }
+
+    function empStats(e) {
+        return {
+            man: Number(e && (e.manual_labor != null ? e.manual_labor : e.manual)) || 0,
+            int: Number(e && e.intelligence) || 0,
+            end: Number(e && e.endurance) || 0
+        };
+    }
+
+
+    // Position requirements (M / I / E) – extend as needed
+    const COMPANY_POSITIONS = {
+        "Pub": [
+            { name: "Bartender",   man: 1500,  int: 0,    end: 3000 },
+            { name: "Bouncer",     man: 6000,  int: 0,    end: 3000 },
+            { name: "Waiter",      man: 1500,  int: 0,    end: 3000 },
+            { name: "Cleaner",     man: 1500,  int: 0,    end: 750  },
+            { name: "Manager",     man: 0,     int: 3000, end: 6000 },
+            { name: "Bookkeeper",  man: 0,     int: 2250, end: 4500 },
+            { name: "Trainer",     man: 0,     int: 9000, end: 4500 },
+            { name: "Promoter",    man: 0,     int: 6000, end: 3000 }
+        ],
+        "Adult Novelties": [
+            { name: "Sales Assistant",   man: 2000,  int: 0,     end: 4000 },
+            { name: "Sexpert",           man: 0,     int: 10000, end: 5000 },
+            { name: "Cleaner",           man: 2000,  int: 0,     end: 1000 },
+            { name: "Store Manager",     man: 0,     int: 4000,  end: 8000 },
+            { name: "Receptionist",      man: 0,     int: 3000,  end: 6000 },
+            { name: "Marketing Manager", man: 0,     int: 8000,  end: 4000 },
+            { name: "HR Officer",        man: 0,     int: 12000, end: 6000 }
+        ],
+        "Sweet Shop": [
+            { name: "Shop Assistant", man: 1500, int: 0,    end: 3000 },
+            { name: "Confectionist",  man: 0,    int: 5000, end: 2500 },
+            { name: "Cleaner",        man: 2000, int: 0,    end: 1000 },
+            { name: "Manager",        man: 0,    int: 3000, end: 6000 },
+            { name: "Receptionist",   man: 0,    int: 2500, end: 5000 },
+            { name: "Marketer",       man: 0,    int: 6000, end: 3000 }
+        ],
+        "Restaurant": [
+            { name: "Waiter",     man: 1500, int: 0,    end: 3000 },
+            { name: "Chef",       man: 0,    int: 5000, end: 2500 },
+            { name: "Cleaner",    man: 2000, int: 0,    end: 1000 },
+            { name: "Manager",    man: 0,    int: 4000, end: 8000 },
+            { name: "Head Chef",  man: 0,    int: 8000, end: 4000 }
+        ],
+        "Candle Shop": [
+            { name: "Salesperson",       man: 0,    int: 750,  end: 1500 },
+            { name: "Chandler",          man: 4500, int: 2250, end: 0 },
+            { name: "Cleaner",           man: 1000, int: 0,    end: 500 },
+            { name: "Manager",           man: 0,    int: 3000, end: 6000 },
+            { name: "Marketer",          man: 0,    int: 5000, end: 2500 }
+        ],
+        "Hair Salon": [
+            { name: "Hairdresser",  man: 0,    int: 3000, end: 6000 },
+            { name: "Apprentice",   man: 1000, int: 0,    end: 2000 },
+            { name: "Cleaner",      man: 2000, int: 0,    end: 1000 },
+            { name: "Receptionist", man: 0,    int: 2500, end: 5000 },
+            { name: "Manager",      man: 0,    int: 4000, end: 8000 },
+            { name: "Stylist",      man: 0,    int: 5000, end: 10000 }
+        ],
+        "Clothing Store": [
+            { name: "Sales Assistant", man: 1500, int: 0,    end: 3000 },
+            { name: "Tailor",          man: 0,    int: 4000, end: 2000 },
+            { name: "Cleaner",         man: 2000, int: 0,    end: 1000 },
+            { name: "Manager",         man: 0,    int: 3000, end: 6000 },
+            { name: "Marketer",        man: 0,    int: 6000, end: 3000 }
+        ],
+        "Flower Shop": [
+            { name: "Florist",         man: 0,    int: 3000, end: 6000 },
+            { name: "Delivery Driver", man: 3000, int: 0,    end: 1500 },
+            { name: "Cleaner",         man: 2000, int: 0,    end: 1000 },
+            { name: "Manager",         man: 0,    int: 3000, end: 6000 }
+        ]
+    };
+
+
+    // Normalize API fields that may be string OR object {name, id, ...} in v2
+    function safeStr(val) {
+        if (val == null || val === '') return '';
+        if (typeof val === 'string') return val;
+        if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+        if (typeof val === 'object') {
+            return String(
+                val.name || val.position || val.title || val.label ||
+                val.company_type || val.type || val.id || ''
+            );
+        }
+        return String(val);
+    }
+    function calcStatEff(stat, required) {
+        if (!required || required <= 0 || !stat || stat <= 0) return 0;
+        const ratio = stat / required;
+        return Math.floor(Math.min(45, 45 * ratio) + Math.max(0, 5 * Math.log2(ratio)));
+    }
+
+    function calcPositionEff(man, int, end, pos) {
+        const reqs = [
+            { stat: man, req: pos.man },
+            { stat: int, req: pos.int },
+            { stat: end, req: pos.end }
+        ].filter(r => r.req > 0);
+        if (!reqs.length) return 0;
+        reqs.sort((a, b) => b.req - a.req);
+        return calcStatEff(reqs[0].stat, reqs[0].req) + (reqs[1] ? calcStatEff(reqs[1].stat, reqs[1].req) : 0);
+    }
+
+    function findBestPosition(man, int, end, companyType) {
+        const typeKey = safeStr(companyType).toLowerCase();
+        const key = Object.keys(COMPANY_POSITIONS).find(k =>
+            k.toLowerCase() === typeKey
+        );
+        const positions = key ? COMPANY_POSITIONS[key] : null;
+        if (!positions) return null;
+        let best = null, bestEff = -1;
+        for (const pos of positions) {
+            const eff = calcPositionEff(man, int, end, pos);
+            if (eff > bestEff) { bestEff = eff; best = { name: pos.name, eff }; }
+        }
+        return best;
+    }
+
+    GM_addStyle(`
+        #tcm-panel{
+            position:fixed;top:80px;right:12px;
+            width:min(520px, calc(100vw - 16px));
+            max-width:calc(100vw - 16px);
+            max-height:min(85vh, calc(100dvh - 24px));
+            background:#1a1a1a;color:#ddd;border:1px solid #444;border-radius:8px;
+            z-index:99999;font-family:Arial,sans-serif;font-size:13px;
+            box-shadow:0 4px 20px rgba(0,0,0,.6);
+            overflow:hidden;display:flex;flex-direction:column;
+            box-sizing:border-box;
+            left:auto;
+        }
+        #tcm-header{
+            background:#2c2c2c;padding:8px 10px;cursor:move;
+            display:flex;justify-content:space-between;align-items:center;
+            border-bottom:1px solid #444;gap:6px;flex-shrink:0;flex-wrap:wrap;
+        }
+        #tcm-header h3{margin:0;font-size:14px;color:#fff;flex:1 1 auto;min-width:0}
+        #tcm-header > div{display:flex;flex-wrap:wrap;gap:2px;align-items:center;justify-content:flex-end}
+        #tcm-body{
+            padding:10px;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;
+            -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+            min-height:0;
+        }
+        #tcm-panel.collapsed #tcm-body{display:none}
+        .tcm-section{margin-bottom:14px}
+        .tcm-section h4{margin:0 0 6px;color:#7eb8ff;font-size:13px;border-bottom:1px solid #333;padding-bottom:3px}
+        .tcm-row{display:flex;justify-content:space-between;gap:8px;margin:3px 0;flex-wrap:wrap}
+        .tcm-label{color:#aaa;flex:0 1 auto}.tcm-value{font-weight:bold;text-align:right;flex:1 1 auto;min-width:0;word-break:break-word}
+        .tcm-good{color:#6f6}.tcm-warn{color:#fc6}.tcm-bad{color:#f66}
+        .tcm-table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:4px 0;border-radius:4px}
+        table.tcm-emp{width:100%;min-width:280px;border-collapse:collapse;font-size:12px}
+        table.tcm-emp th,table.tcm-emp td{padding:4px 5px;text-align:left;border-bottom:1px solid #333;vertical-align:top}
+        table.tcm-emp th{background:#2a2a2a;color:#ccc;position:sticky;top:0;z-index:1}
+        table.tcm-emp td{color:#c8c8c8}
+        .tcm-btn{background:#3a6ea5;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin:2px;touch-action:manipulation}
+        .tcm-btn:hover{background:#4a8ec5}.tcm-btn.danger{background:#a53a3a}.tcm-btn.secondary{background:#555}
+        #tcm-status{font-size:11px;color:#888;margin-top:6px}
+        .tcm-reco{background:#252525;border-left:3px solid #7eb8ff;padding:6px 8px;margin:4px 0;border-radius:0 4px 4px 0}
+        .best-pos{color:#7eb8ff;font-weight:bold}.stats-mini{font-size:11px;color:#c8c8c8}
+        .dir-badge{background:#1a4a2a;color:#8f8;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px}
+        .emp-badge{background:#4a3a1a;color:#fc8;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px}
+        .tcm-key-box{background:#222;border:1px solid #555;border-radius:6px;padding:12px;margin-bottom:12px}
+        .tcm-key-box input{width:100%;padding:8px;background:#111;border:1px solid #555;color:#fff;border-radius:4px;font-size:13px;box-sizing:border-box;margin:6px 0}
+        .tcm-key-box label{display:block;margin-bottom:4px;color:#ccc}
+        .tcm-key-note{font-size:11px;color:#888;margin-top:6px;line-height:1.4}
+        .tcm-error-box{background:#2a1515;border:1px solid #a53a3a;border-radius:6px;padding:12px;margin-bottom:12px;color:#fcc;line-height:1.5}
+        .tcm-error-box strong{color:#f88}
+        .tcm-info-box{background:#15202a;border:1px solid #3a6ea5;border-radius:6px;padding:10px;margin-bottom:12px;color:#cde;line-height:1.45;font-size:12px}
+        table.tcm-peer{width:100%;min-width:260px;border-collapse:collapse;font-size:12px;margin-top:6px}
+        table.tcm-peer th,table.tcm-peer td{padding:3px 5px;text-align:left;border-bottom:1px solid #333}
+        table.tcm-peer th{background:#2a2a2a;color:#ccc}
+        table.tcm-peer td{color:#c8c8c8}
+        .tcm-gap{color:#fc6;font-weight:bold}
+        .tcm-ok{color:#6f6}
+        .tcm-peer-note{font-size:11px;color:#888;margin-top:6px;line-height:1.4}
+        .tcm-tabs{display:flex;gap:4px;margin:8px 0 10px;border-bottom:1px solid #333;padding-bottom:0;flex-wrap:wrap}
+        .tcm-tab{background:transparent;border:1px solid transparent;border-bottom:none;color:#aaa;padding:6px 12px;border-radius:6px 6px 0 0;cursor:pointer;font-size:12px;touch-action:manipulation}
+        .tcm-tab:hover{color:#ddd;background:#252525}
+        .tcm-tab.active{background:#2a2a2a;color:#7eb8ff;border-color:#333;font-weight:bold}
+        .tcm-tab-panel{display:none}
+        .tcm-tab-panel.active{display:block}
+        /* Phones / narrow PDA viewports */
+        @media (max-width:640px){
+            #tcm-panel{
+                top:max(8px, env(safe-area-inset-top, 0px));
+                right:max(8px, env(safe-area-inset-right, 0px));
+                left:max(8px, env(safe-area-inset-left, 0px));
+                width:auto;
+                max-width:none;
+                max-height:calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+                border-radius:10px;
+                font-size:12px;
+            }
+            #tcm-header{padding:8px;cursor:default}
+            #tcm-header h3{font-size:13px}
+            #tcm-body{padding:8px}
+            .tcm-btn{padding:6px 10px;font-size:12px;min-height:32px}
+            .tcm-tab{padding:8px 10px;font-size:12px}
+            table.tcm-emp,table.tcm-peer{font-size:11px}
+            table.tcm-emp th,table.tcm-emp td,
+            table.tcm-peer th,table.tcm-peer td{padding:4px 3px}
+            .stats-mini{font-size:10px}
+        }
+        @media (max-width:400px){
+            #tcm-panel{top:4px;left:4px;right:4px;max-height:calc(100dvh - 8px)}
+            #tcm-header h3{font-size:12px}
+            .tcm-tab{padding:6px 8px;font-size:11px}
+        }
+        @media (max-height:500px) and (max-width:900px){
+            #tcm-panel{max-height:calc(100dvh - 12px);top:6px}
+        }
+    `);
+
+    function createPanel() {
+        if (document.getElementById('tcm-panel')) return;
+        const panel = document.createElement('div');
+        panel.id = 'tcm-panel';
+        panel        if (discordMeta.lastLogPostDateTCT == null && discordMeta.lastPostDateTCT === dateStr) return false;
 
         // Another device holds an active claim
         if (
