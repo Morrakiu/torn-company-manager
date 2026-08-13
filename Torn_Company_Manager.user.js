@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.25.0
-// @description  Training contracts, plan, calculator. Full positions, PDA, JSONBin, Sheets, TornStats.
+// @version      3.25.2
+// @description  Training contracts, plan, calculator. Peer role-mix advisor (API only). Full positions, PDA, JSONBin, Sheets, TornStats.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=companies*
@@ -1002,8 +1002,47 @@
     }
 
     /**
-     * Greedy company-wide assignment: spreads staff across roles using fit scores
-     * + anti-stacking penalty, with first pass on priority roles (Manager/Trainer/…).
+     * Peer role-mix targets scaled to our headcount.
+     * Uses lastPeerReport.rows (API peer role averages) when available.
+     * Returns null when no usable peer data for this company type.
+     */
+    function getPeerRoleTargets(nStaff, companyType) {
+        if (!lastPeerReport || !Array.isArray(lastPeerReport.rows) || !lastPeerReport.rows.length) return null;
+        if (!(nStaff > 0)) return null;
+
+        // Prefer matching company type so we don't apply Strip Club mix to a Pub
+        const reportType = safeStr(lastPeerReport.typeName).toLowerCase();
+        let ourType = safeStr(companyType).toLowerCase();
+        if (/^\d+$/.test(ourType)) {
+            const named = resolveCompanyTypeName(ourType, null);
+            if (named) ourType = named.toLowerCase();
+        } else {
+            const named = resolveCompanyTypeName(ourType, null);
+            if (named) ourType = named.toLowerCase();
+        }
+        if (reportType && ourType && reportType !== ourType) {
+            // Allow fuzzy containment (e.g. "pub" vs "Candlewick Pub")
+            if (!reportType.includes(ourType) && !ourType.includes(reportType)) return null;
+        }
+
+        const rows = lastPeerReport.rows;
+        const sumAvg = rows.reduce((s, r) => s + (Number(r.peerAvg) || 0), 0);
+        if (sumAvg <= 0.05) return null;
+
+        // Map peer role names → targets; also build lowercase lookup for fuzzy match later
+        const targets = {};
+        rows.forEach(r => {
+            const name = safeStr(r.role);
+            if (!name) return;
+            targets[name] = ((Number(r.peerAvg) || 0) / sumAvg) * nStaff;
+        });
+        return targets;
+    }
+
+    /**
+     * Greedy company-wide assignment: fit scores + anti-stacking, priority roles first.
+     * When peer role-mix data is available (lastPeerReport), targets are scaled to our
+     * headcount so the plan prefers under-filled roles vs high-earning peers.
      */
     function suggestCompanyAssignments(empArr, companyType) {
         const positions = getPositionsForType(companyType);
@@ -1032,12 +1071,47 @@
         const roleLoad = {};
         positions.forEach(p => { roleLoad[p.name] = 0; });
         const n = people.length;
-        // Soft capacity per role: spread staff (at least 1, scale with size)
+        // Soft capacity per role (fallback when no peer mix): spread staff
         const softCap = Math.max(1, Math.ceil(n / Math.max(3, Math.min(positions.length, 6))));
+
+        // Peer-informed targets (fractional). null → pure softCap logic
+        const peerTargetsRaw = getPeerRoleTargets(n, companyType);
+        const peerTargets = {}; // canonical position name → target count
+        let usingPeerMix = false;
+        if (peerTargetsRaw) {
+            // Match peer role strings to our position table (case-insensitive / fuzzy)
+            const posByLower = {};
+            positions.forEach(p => { posByLower[p.name.toLowerCase()] = p.name; });
+            Object.keys(peerTargetsRaw).forEach(role => {
+                const rl = role.toLowerCase();
+                let canon = posByLower[rl];
+                if (!canon) {
+                    // Fuzzy: substring either way
+                    const hit = Object.keys(posByLower).find(k => k.includes(rl) || rl.includes(k));
+                    if (hit) canon = posByLower[hit];
+                }
+                if (canon) {
+                    peerTargets[canon] = (peerTargets[canon] || 0) + peerTargetsRaw[role];
+                    usingPeerMix = true;
+                }
+            });
+            // Ensure every known position has a key (0 target if peers never staff it)
+            positions.forEach(p => {
+                if (peerTargets[p.name] == null) peerTargets[p.name] = 0;
+            });
+        }
 
         function crowdingPenalty(roleName) {
             const load = roleLoad[roleName] || 0;
-            // Mild until soft cap, then steep — stops everyone → Cleaner
+            if (usingPeerMix) {
+                const tgt = peerTargets[roleName] != null ? peerTargets[roleName] : softCap;
+                // Under target → bonus (negative penalty); over → rising cost
+                // Gentle slope so fit still matters; steeper once past target+0.5
+                if (load + 0.5 < tgt) return -(tgt - load) * 7;
+                if (load < tgt + 0.5) return (load - tgt) * 5;
+                return (load - tgt) * 14 + 4;
+            }
+            // Fallback: mild until soft cap, then steep — stops everyone → Cleaner
             if (load < softCap) return load * 4;
             return softCap * 4 + (load - softCap) * 14;
         }
@@ -1055,9 +1129,19 @@
         }
 
         // Pass 1: strongest staff → priority roles (one seat each first)
+        // Still respect peer underfill: prefer priority roles that peers actually staff
         const priorityNames = positions.filter(p => isPriorityRoleName(p.name)).map(p => p.name);
         const byStrength = people.slice().sort((a, b) => b.totalStats - a.totalStats);
-        for (const roleName of priorityNames) {
+        // When peer mix exists, order priority roles by how under-filled they are first
+        const orderedPriority = priorityNames.slice().sort((a, b) => {
+            if (!usingPeerMix) return 0;
+            const gapA = (peerTargets[a] || 0) - (roleLoad[a] || 0);
+            const gapB = (peerTargets[b] || 0) - (roleLoad[b] || 0);
+            return gapB - gapA;
+        });
+        for (const roleName of orderedPriority) {
+            // Skip priority roles peers essentially never use (target ~0) unless no peer data
+            if (usingPeerMix && (peerTargets[roleName] || 0) < 0.25) continue;
             let pick = null;
             for (const person of byStrength) {
                 if (assigned.has(person.idx)) continue;
@@ -1076,7 +1160,7 @@
             }
         }
 
-        // Pass 2: everyone else — best fit with anti-stacking
+        // Pass 2: everyone else — best fit with anti-stacking / peer-target bias
         byStrength.forEach(person => {
             if (assigned.has(person.idx)) return;
             const choice = bestOpenRole(person, { priorityOnly: false });
@@ -1099,7 +1183,8 @@
                 currentEff: curScore.eff,
                 suggestedEff: sugScore.eff,
                 improve: sugScore.fit - curScore.fit,
-                emp: person.emp
+                emp: person.emp,
+                usedPeerMix: usingPeerMix
             };
         });
     }
@@ -2328,98 +2413,6 @@
         };
     }
 
-    // ---------- Opt-in role-share pool (JSONBin) ----------
-    const ROLE_SHARE_OPT_KEY = 'tcmShareRoleMix';
-    function loadShareRoleMixOpt() {
-        return GM_getValue(ROLE_SHARE_OPT_KEY, false) === true || GM_getValue(ROLE_SHARE_OPT_KEY, '0') === '1';
-    }
-    function saveShareRoleMixOpt(on) {
-        GM_setValue(ROLE_SHARE_OPT_KEY, !!on);
-    }
-
-    /** Local mirror of shared role snapshots: { [type]: { [companyId]: { rating, roles, name, updated } } } */
-    function loadRoleSharePool() { return loadJson('tcmRoleSharePool', {}); }
-    function saveRoleSharePool(pool) { GM_setValue('tcmRoleSharePool', JSON.stringify(pool || {})); }
-
-    function buildOwnRoleShareEntry() {
-        if (!companyData) return null;
-        const p = companyData.company || companyData.profile || {};
-        const typeName = resolveCompanyTypeName(p.company_type || p.type || '', p) || 'Unknown';
-        const cid = String((userInfo && userInfo.company_id) || p.ID || p.id || '');
-        if (!cid) return null;
-        const roles = countRoles(normalizeEmployeeList(companyData));
-        const roleCount = Object.values(roles).reduce((a, b) => a + b, 0);
-        if (roleCount < 2) return null;
-        return {
-            type: typeName,
-            companyId: cid,
-            name: safeStr(p.name) || null,
-            rating: p.rating != null ? Number(p.rating) : null,
-            roles,
-            roleCount,
-            updated: Date.now()
-        };
-    }
-
-    function mergeRoleShareFromRemote(remoteShares) {
-        if (!remoteShares || typeof remoteShares !== 'object') return;
-        const pool = loadRoleSharePool();
-        Object.keys(remoteShares).forEach(type => {
-            const bag = remoteShares[type];
-            if (!bag || typeof bag !== 'object') return;
-            if (!pool[type]) pool[type] = {};
-            Object.keys(bag).forEach(cid => {
-                const e = bag[cid];
-                if (!e || !e.roles) return;
-                const prev = pool[type][cid];
-                if (!prev || (e.updated || 0) >= (prev.updated || 0)) {
-                    pool[type][cid] = e;
-                }
-            });
-        });
-        // Drop entries older than 21 days
-        const cutoff = Date.now() - 21 * 86400000;
-        Object.keys(pool).forEach(type => {
-            Object.keys(pool[type] || {}).forEach(cid => {
-                if ((pool[type][cid].updated || 0) < cutoff) delete pool[type][cid];
-            });
-        });
-        saveRoleSharePool(pool);
-    }
-
-    function roleSharePoolForRemote() {
-        const pool = loadRoleSharePool();
-        if (loadShareRoleMixOpt()) {
-            const own = buildOwnRoleShareEntry();
-            if (own) {
-                if (!pool[own.type]) pool[own.type] = {};
-                pool[own.type][own.companyId] = own;
-                saveRoleSharePool(pool);
-            }
-        }
-        return pool;
-    }
-
-    /** Average role counts from opt-in shares for a company type (excluding own id). */
-    function roleAveragesFromSharePool(typeName, ownId) {
-        const pool = loadRoleSharePool();
-        const bag = pool[typeName] || pool[String(typeName).toLowerCase()] || {};
-        const rows = Object.keys(bag)
-            .filter(cid => String(cid) !== String(ownId || ''))
-            .map(cid => bag[cid])
-            .filter(e => e && e.roles && e.roleCount >= 2);
-        if (!rows.length) return { peers: 0, averages: {} };
-        const totals = {};
-        rows.forEach(e => {
-            Object.keys(e.roles).forEach(r => {
-                totals[r] = (totals[r] || 0) + Number(e.roles[r] || 0);
-            });
-        });
-        const averages = {};
-        Object.keys(totals).forEach(r => { averages[r] = totals[r] / rows.length; });
-        return { peers: rows.length, averages, samples: rows };
-    }
-
     const INACTIVE_WARN_DAYS = 3;
     const INACTIVE_REPLACE_DAYS = 7;
 
@@ -3027,48 +3020,22 @@
             });
         });
 
-        // Merge opt-in shared role snapshots (other directors who enabled share)
-        const shareAvg = roleAveragesFromSharePool(typeName || 'Unknown', ownId);
-        let sharePeersUsed = 0;
-        if (shareAvg.peers > 0) {
-            // If API returned few role sets, weight share pool in
-            const apiN = peersWithRoles.length;
-            Object.keys(shareAvg.averages).forEach(role => {
-                const shared = shareAvg.averages[role];
-                if (apiN > 0) {
-                    roleTotals[role] = (roleTotals[role] || 0) + shared * shareAvg.peers;
-                } else {
-                    roleTotals[role] = (roleTotals[role] || 0) + shared * shareAvg.peers;
-                }
-            });
-            sharePeersUsed = shareAvg.peers;
-        }
-
         Object.keys(ownRoles).forEach(role => {
             if (roleTotals[role] == null) roleTotals[role] = 0;
         });
 
-        const denom = peersWithRoles.length + sharePeersUsed;
+        const denom = peersWithRoles.length;
         const rows = Object.keys(roleTotals).sort().map(role => {
             const peerAvg = denom ? (roleTotals[role] / denom) : 0;
             const yours = ownRoles[role] || 0;
             return { role, yours, peerAvg, gap: peerAvg - yours };
         });
 
-        // Publish our role mix when opted in
-        if (loadShareRoleMixOpt() && userInfo && userInfo.isDirector) {
-            try {
-                roleSharePoolForRemote();
-                if (jsonbinId && jsonbinKey) await pushTrainLogRemote(loadTrainLog());
-            } catch (e) { /* ignore */ }
-        }
-
         const cacheInfo = peerCacheInfo(typeName);
         lastPeerReport = {
             typeName: typeName || 'Unknown',
             peerCount: starPeers.length,
             peersWithRoles: peersWithRoles.length,
-            sharePeers: sharePeersUsed,
             scanned: ids.length,
             peers: starPeers,
             rows,
@@ -3090,17 +3057,16 @@
 
         if (!starPeers.length) {
             setStatus(sourceNote + 'No ' + PEER_STAR + '★ peers in ' + ids.length + ' IDs', true);
-        } else if (!peersWithRoles.length && !sharePeersUsed) {
+        } else if (!peersWithRoles.length) {
             setStatus(
                 sourceNote + starPeers.length + ' × ' + PEER_STAR +
-                '★ via Torn API (staffing/income). No employee roles returned yet — try again or enable Role Share.',
+                '★ via Torn API (staffing/income). No employee roles returned yet — try again later.',
                 false
             );
         } else {
             setStatus(
                 sourceNote + 'Peers: ' + starPeers.length + '×' + PEER_STAR + '★ · roles from ' +
-                peersWithRoles.length + ' API' +
-                (sharePeersUsed ? (' + ' + sharePeersUsed + ' shared') : '')
+                peersWithRoles.length + ' API'
             );
         }
     }
@@ -3193,11 +3159,9 @@
         });
         html += `</tbody></table>`;
 
-        if ((r.peersWithRoles > 0 || r.sharePeers > 0) && r.rows && r.rows.length) {
-            const srcNote = (r.peersWithRoles || 0) + ' API' +
-                (r.sharePeers ? (' + ' + r.sharePeers + ' shared') : '');
+        if (r.peersWithRoles > 0 && r.rows && r.rows.length) {
             html += `<h4 style="margin-top:12px">Role mix
-                <span style="color:#888;font-weight:normal">(${srcNote})</span>
+                <span style="color:#888;font-weight:normal">(${r.peersWithRoles || 0} API)</span>
             </h4>`;
             html += `<table class="tcm-peer">
                 <thead><tr><th>Position</th><th>You</th><th>Peer avg</th><th>Gap</th></tr></thead><tbody>`;
@@ -3212,23 +3176,13 @@
                 </tr>`;
             });
             html += `</tbody></table>`;
-            html += `<div class="tcm-peer-note">Roles from Torn API <code>company/{id}?selections=employees</code>
-                ${r.sharePeers ? ' plus opt-in director shares via Data Sync.' : '.'}</div>`;
+            html += `<div class="tcm-peer-note">Roles from Torn API <code>company/{id}?selections=employees</code>.</div>`;
         } else {
             html += `<div class="tcm-peer-note" style="margin-top:8px">
-                <strong>Role mix:</strong> staffing/income from API. Enable <em>Share my role mix</em> below
-                (opt-in) so directors can pool anonymized position counts via Data Sync.
+                <strong>Role mix:</strong> staffing/income from Torn API
+                <code>company/{id}?selections=employees</code>. Refresh peers if role data is missing.
             </div>`;
         }
-
-        const shareOn = loadShareRoleMixOpt();
-        html += `<div style="margin-top:10px;padding:8px;border:1px solid #333;border-radius:6px;background:#1a1a1a">
-            <label style="cursor:pointer;color:#ccc;font-size:12px">
-                <input type="checkbox" id="tcm-share-roles" ${shareOn ? 'checked' : ''}/>
-                <strong>Share my role mix</strong> (opt-in) — publishes your position counts to Data Sync
-                so other directors of the same company type can average peer staffing. No work stats.
-            </label>
-        </div>`;
 
         html += `</div>`;
         return html;
@@ -3496,24 +3450,6 @@
                 if (!apiKey) { showKeyInput(); return; }
                 if (!confirm('Clear cached peer IDs and rebuild the full 10★ list from Torn API?')) return;
                 forceUpdatePeers();
-            };
-        }
-        const shareCb = document.getElementById('tcm-share-roles');
-        if (shareCb) {
-            shareCb.onchange = async () => {
-                saveShareRoleMixOpt(!!shareCb.checked);
-                setStatus(shareCb.checked
-                    ? 'Role share enabled — will publish on next peer refresh / Data Sync'
-                    : 'Role share disabled');
-                if (shareCb.checked && jsonbinId && jsonbinKey) {
-                    try {
-                        roleSharePoolForRemote();
-                        await pushTrainLogRemote(loadTrainLog());
-                        setStatus('Role share published to Data Sync');
-                    } catch (e) {
-                        setStatus('Share saved locally; Data Sync push failed', true);
-                    }
-                }
             };
         }
         const filt = document.getElementById('tcm-bench-filter');
@@ -4458,9 +4394,6 @@
             metrics: loadMetricsLog(),
             // Full weekly 10★ peer ID lists by company type (shared so only one device hits Torn)
             peers: peerCacheForRemote(),
-            // Opt-in anonymized role snapshots for peer role-mix (directors only)
-            roleShares: roleSharePoolForRemote(),
-            shareRoleMix: loadShareRoleMixOpt(),
             discord: {
                 logWebhook: discordLogWebhook || '',
                 panelWebhook: discordPanelWebhook || '',
@@ -5032,9 +4965,6 @@
                 const mergedPeers = mergePeerCaches(loadPeerIdCache(), body.peers);
                 GM_setValue(PEER_ID_KEY, JSON.stringify(mergedPeers));
             }
-            if (body.roleShares && typeof body.roleShares === 'object') {
-                mergeRoleShareFromRemote(body.roleShares);
-            }
             if (Array.isArray(body.trainContracts)) {
                 mergeTrainContractsFromRemote(body.trainContracts);
             }
@@ -5308,7 +5238,7 @@
                 <strong>Data Sync</strong>
                 <div class="tcm-key-note" style="margin:8px 0 12px">
                     Two optional channels — use either or both:<br>
-                    • <strong>JSONBin</strong> — live Web ↔ PDA sync (trains, metrics, Discord, peers, role share)<br>
+                    • <strong>JSONBin</strong> — live Web ↔ PDA sync (trains, metrics, Discord, peers)<br>
                     • <strong>Google Sheets</strong> — one-way export for spreadsheets / bookkeeping<br>
                     <span style="color:#9cf">Torn PDA:</span> use injection time <strong>End</strong>. Install/update
                     <strong>GMforPDA</strong> so PUT/PATCH work (JSONBin + Discord panel edits).
@@ -5355,7 +5285,6 @@
   "trains": {},
   "metrics": { "weeks": {} },
   "peers": {},
-  "roleShares": {},
   "discord": { "logWebhook": "", "panelWebhook": "", "weeklyWebhook": "", "opts": {}, "meta": {} }
 }</textarea>
                     <button type="button" class="tcm-btn secondary" id="tcm-copy-starter">Copy starter JSON</button>
@@ -6769,10 +6698,14 @@
                     <td class="stats-mini">${man.toLocaleString()} / ${int.toLocaleString()} / ${end.toLocaleString()}</td>
                 </tr>`;
             });
+            const peerMixNote = (plan.length && plan[0].usedPeerMix)
+                ? ' Plan targets use <strong>peer role-mix</strong> (Peers tab) scaled to your headcount.'
+                : ' Plan uses fit + anti-stacking (refresh <strong>Peers</strong> for role-mix targets).';
             html += `</tbody></table>
                 <div style="font-size:11px;color:#888;margin-top:6px">
                     Dropdown: ★ best fit, <strong>rec</strong> = company-plan suggestion, <strong>now</strong> = current.
                     Amber <strong>→ Role</strong> is the recommended move. Fit is company-aware (not raw max WS).
+                    ${peerMixNote}
                 </div></div>`;
         } else {
             html += `<div class="tcm-section"><h4>Employees</h4>
