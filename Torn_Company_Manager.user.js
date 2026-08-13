@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.25.4
+// @version      3.25.5
 // @description  Training contracts, plan, calculator. Peer role-mix advisor (API only). Full positions, PDA, JSONBin, Sheets, TornStats.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
