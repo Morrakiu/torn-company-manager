@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Company Manager
-// @namespace    https://torn.com/
-// @version      3.21.1
-// @description  PDA-compatible: JSONBin + Sheets, TornStats helper, API peers. Works with GMforPDA / PDA_http*.
+// @name         Morrakiu's Company Manager
+// @namespace    https://github.com/Morrakiu/torn-company-manager
+// @version      3.24.1
+// @description  Universal position tables (all 39 company types). PDA peers, JSONBin, Sheets, TornStats.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=companies*
@@ -22,6 +22,8 @@
 // @connect      yata.yt
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
+// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/main/Torn_Company_Manager.user.js
+// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/main/Torn_Company_Manager.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -251,7 +253,11 @@
     const PEER_MAX = 40; // max peers to profile via API per refresh (full 10★ list is cached)
     const SALARY_RATIO_WARN = 0.60; // payroll / daily income
     const EE_TIERS = [50, 100, 150, 200];
-    const TRAIN_PRIMARY = 50; // approx EE points per primary train (Torn convention)
+    const TRAIN_PRIMARY = 50;   // director train: +50 primary work stat
+    const TRAIN_SECONDARY = 25; // director train: +25 secondary work stat
+    const TRAINER_TRAINS = { 50: 1, 100: 1, 150: 2, 200: 3 };
+    const TRAIN_EXCLUDE_KEY = 'tcmTrainExclude';
+    const TRAIN_SETTLE_KEY = 'tcmTrainSettlingDays';
     // Normalize abbreviated job titles (from community TCM scripts)
     const POSITION_ALIASES = {
         'hr officer': 'human resources', 'h.r. officer': 'human resources',
@@ -473,69 +479,397 @@
 
 
     // Position requirements (M / I / E) – extend as needed
-    const COMPANY_POSITIONS = {
-        "Pub": [
-            { name: "Bartender",   man: 1500,  int: 0,    end: 3000 },
-            { name: "Bouncer",     man: 6000,  int: 0,    end: 3000 },
-            { name: "Waiter",      man: 1500,  int: 0,    end: 3000 },
-            { name: "Cleaner",     man: 1500,  int: 0,    end: 750  },
-            { name: "Manager",     man: 0,     int: 3000, end: 6000 },
-            { name: "Bookkeeper",  man: 0,     int: 2250, end: 4500 },
-            { name: "Trainer",     man: 0,     int: 9000, end: 4500 },
-            { name: "Promoter",    man: 0,     int: 6000, end: 3000 }
-        ],
+        const COMPANY_POSITIONS = {
         "Adult Novelties": [
-            { name: "Sales Assistant",   man: 2000,  int: 0,     end: 4000 },
-            { name: "Sexpert",           man: 0,     int: 10000, end: 5000 },
-            { name: "Cleaner",           man: 2000,  int: 0,     end: 1000 },
-            { name: "Store Manager",     man: 0,     int: 4000,  end: 8000 },
-            { name: "Receptionist",      man: 0,     int: 3000,  end: 6000 },
-            { name: "Marketing Manager", man: 0,     int: 8000,  end: 4000 },
-            { name: "HR Officer",        man: 0,     int: 12000, end: 6000 }
+            { name: "Human Resources", man: 0, int: 12000, end: 6000 },
+            { name: "Sexpert", man: 0, int: 10000, end: 5000 },
+            { name: "Store Manager", man: 0, int: 4000, end: 8000 },
+            { name: "Marketing Manager", man: 0, int: 8000, end: 4000 },
+            { name: "Receptionist", man: 0, int: 3000, end: 6000 },
+            { name: "Sales Assistant", man: 2000, int: 0, end: 4000 },
+            { name: "Cleaner", man: 2000, int: 0, end: 1000 },
         ],
-        "Sweet Shop": [
-            { name: "Shop Assistant", man: 1500, int: 0,    end: 3000 },
-            { name: "Confectionist",  man: 0,    int: 5000, end: 2500 },
-            { name: "Cleaner",        man: 2000, int: 0,    end: 1000 },
-            { name: "Manager",        man: 0,    int: 3000, end: 6000 },
-            { name: "Receptionist",   man: 0,    int: 2500, end: 5000 },
-            { name: "Marketer",       man: 0,    int: 6000, end: 3000 }
-        ],
-        "Restaurant": [
-            { name: "Waiter",     man: 1500, int: 0,    end: 3000 },
-            { name: "Chef",       man: 0,    int: 5000, end: 2500 },
-            { name: "Cleaner",    man: 2000, int: 0,    end: 1000 },
-            { name: "Manager",    man: 0,    int: 4000, end: 8000 },
-            { name: "Head Chef",  man: 0,    int: 8000, end: 4000 }
+        "Amusement Park": [
+            { name: "Inspector", man: 0, int: 135000, end: 67500 },
+            { name: "Manager", man: 0, int: 45000, end: 90000 },
+            { name: "Marketer", man: 0, int: 90000, end: 45000 },
+            { name: "Security Guard", man: 79000, int: 0, end: 39500 },
+            { name: "Mechanic", man: 67500, int: 33750, end: 0 },
+            { name: "Accountant", man: 0, int: 33750, end: 67500 },
+            { name: "Ride Attendant", man: 0, int: 22500, end: 45000 },
+            { name: "Entertainer", man: 34000, int: 0, end: 17000 },
+            { name: "Ticket Agent", man: 0, int: 11250, end: 22500 },
+            { name: "Janitor", man: 22500, int: 0, end: 11250 },
         ],
         "Candle Shop": [
-            { name: "Salesperson",       man: 0,    int: 750,  end: 1500 },
-            { name: "Chandler",          man: 4500, int: 2250, end: 0 },
-            { name: "Cleaner",           man: 1000, int: 0,    end: 500 },
-            { name: "Manager",           man: 0,    int: 3000, end: 6000 },
-            { name: "Marketer",          man: 0,    int: 5000, end: 2500 }
+            { name: "Chandler", man: 4500, int: 2250, end: 0 },
+            { name: "Trainer", man: 0, int: 4500, end: 2250 },
+            { name: "Quality Control", man: 0, int: 1500, end: 3000 },
+            { name: "Bookkeeper", man: 0, int: 1250, end: 2500 },
+            { name: "Salesperson", man: 0, int: 750, end: 1500 },
+            { name: "Cleaner", man: 1000, int: 0, end: 500 },
         ],
-        "Hair Salon": [
-            { name: "Hairdresser",  man: 0,    int: 3000, end: 6000 },
-            { name: "Apprentice",   man: 1000, int: 0,    end: 2000 },
-            { name: "Cleaner",      man: 2000, int: 0,    end: 1000 },
-            { name: "Receptionist", man: 0,    int: 2500, end: 5000 },
-            { name: "Manager",      man: 0,    int: 4000, end: 8000 },
-            { name: "Stylist",      man: 0,    int: 5000, end: 10000 }
+        "Car Dealership": [
+            { name: "Training Adviser", man: 0, int: 63000, end: 31500 },
+            { name: "Manager", man: 0, int: 21000, end: 42000 },
+            { name: "Webmaster", man: 0, int: 42000, end: 21000 },
+            { name: "Receptionist", man: 0, int: 15750, end: 31500 },
+            { name: "Mechanic", man: 26500, int: 0, end: 13250 },
+            { name: "Sales Executive", man: 0, int: 21000, end: 10500 },
+            { name: "Cleaner", man: 10500, int: 0, end: 5250 },
+            { name: "Sales Apprentice", man: 0, int: 5500, end: 2750 },
         ],
         "Clothing Store": [
-            { name: "Sales Assistant", man: 1500, int: 0,    end: 3000 },
-            { name: "Tailor",          man: 0,    int: 4000, end: 2000 },
-            { name: "Cleaner",         man: 2000, int: 0,    end: 1000 },
-            { name: "Manager",         man: 0,    int: 3000, end: 6000 },
-            { name: "Marketer",        man: 0,    int: 6000, end: 3000 }
+            { name: "Line Manager", man: 0, int: 6000, end: 3000 },
+            { name: "Store Manager", man: 0, int: 2000, end: 4000 },
+            { name: "Marketing Manager", man: 0, int: 4000, end: 2000 },
+            { name: "Accountant", man: 0, int: 1500, end: 3000 },
+            { name: "Security Guard", man: 3000, int: 0, end: 1500 },
+            { name: "Salesperson", man: 0, int: 2000, end: 1000 },
+            { name: "Cashier", man: 750, int: 0, end: 1500 },
+            { name: "Cleaner", man: 1000, int: 0, end: 500 },
+            { name: "Sales Trainee", man: 0, int: 500, end: 250 },
+        ],
+        "Cruise Line": [
+            { name: "Captain", man: 0, int: 154500, end: 77250 },
+            { name: "First Officer", man: 0, int: 105000, end: 52500 },
+            { name: "Doctor", man: 0, int: 103000, end: 51500 },
+            { name: "Specialist", man: 0, int: 90000, end: 45000 },
+            { name: "Bosun", man: 0, int: 37000, end: 74000 },
+            { name: "Marketer", man: 0, int: 72000, end: 36000 },
+            { name: "Chef", man: 0, int: 64500, end: 32250 },
+            { name: "Engineer", man: 54500, int: 27250, end: 0 },
+            { name: "Receptionist", man: 0, int: 21000, end: 42000 },
+            { name: "Steward", man: 0, int: 20750, end: 41500 },
+            { name: "Bartender", man: 19250, int: 0, end: 38500 },
+            { name: "Deckhand", man: 26000, int: 0, end: 13000 },
+            { name: "Ticket Agent", man: 0, int: 13000, end: 26000 },
+        ],
+        "Cyber Cafe": [
+            { name: "Teacher", man: 0, int: 30000, end: 15000 },
+            { name: "Manager", man: 0, int: 10000, end: 20000 },
+            { name: "Marketer", man: 0, int: 20000, end: 10000 },
+            { name: "Administrator", man: 0, int: 20000, end: 10000 },
+            { name: "Receptionist", man: 0, int: 7500, end: 15000 },
+            { name: "Technician", man: 8750, int: 17500, end: 0 },
+            { name: "Cashier", man: 0, int: 5000, end: 10000 },
+            { name: "Cleaner", man: 5000, int: 0, end: 2500 },
+        ],
+        "Detective Agency": [
+            { name: "Chief Investigator", man: 40000, int: 80000, end: 0 },
+            { name: "Client Liaison", man: 0, int: 62000, end: 31000 },
+            { name: "Intelligence Analyst", man: 0, int: 58000, end: 29000 },
+            { name: "Surveillance", man: 26000, int: 52000, end: 0 },
+            { name: "Private Investigator", man: 22500, int: 45500, end: 0 },
+            { name: "Trainee Investigator", man: 14000, int: 28000, end: 0 },
+            { name: "Secretary", man: 12500, int: 0, end: 25000 },
+        ],
+        "Farm": [
+            { name: "Consultant", man: 0, int: 55500, end: 27750 },
+            { name: "Farm Manager", man: 0, int: 18500, end: 37000 },
+            { name: "Bookkeeper", man: 0, int: 14000, end: 28000 },
+            { name: "Delivery Driver", man: 23000, int: 0, end: 11500 },
+            { name: "Dairy Farmer", man: 23000, int: 0, end: 11500 },
+            { name: "Herdsperson", man: 18500, int: 0, end: 9250 },
+            { name: "Poultry Farmer", man: 18500, int: 0, end: 9250 },
+            { name: "Retailer", man: 0, int: 18500, end: 9250 },
+            { name: "Harvester", man: 14000, int: 0, end: 7000 },
+        ],
+        "Firework Stand": [
+            { name: "Trainer", man: 0, int: 3000, end: 1500 },
+            { name: "Pyrotechnician", man: 3000, int: 1500, end: 0 },
+            { name: "Manager", man: 0, int: 1000, end: 2000 },
+            { name: "Advertising Manager", man: 0, int: 2000, end: 1000 },
+            { name: "Bookkeeper", man: 0, int: 750, end: 1500 },
+            { name: "Salesperson", man: 0, int: 500, end: 1000 },
+            { name: "Picker Packer", man: 500, int: 0, end: 250 },
+        ],
+        "Fitness Center": [
+            { name: "Manager", man: 0, int: 31000, end: 62000 },
+            { name: "Marketer", man: 0, int: 62000, end: 31000 },
+            { name: "Nutritionist", man: 27250, int: 54500, end: 0 },
+            { name: "Swimming Instructor", man: 23250, int: 0, end: 46500 },
+            { name: "Human Resources", man: 0, int: 23250, end: 46500 },
+            { name: "Fitness Instructor", man: 46500, int: 0, end: 23250 },
+            { name: "Lifeguard", man: 19500, int: 0, end: 39000 },
+            { name: "Personal Trainer", man: 31000, int: 0, end: 15500 },
+            { name: "Cleaner", man: 15500, int: 0, end: 7750 },
+            { name: "Receptionist", man: 0, int: 5000, end: 10000 },
         ],
         "Flower Shop": [
-            { name: "Florist",         man: 0,    int: 3000, end: 6000 },
-            { name: "Delivery Driver", man: 3000, int: 0,    end: 1500 },
-            { name: "Cleaner",         man: 2000, int: 0,    end: 1000 },
-            { name: "Manager",         man: 0,    int: 3000, end: 6000 }
-        ]
+            { name: "Manager", man: 0, int: 1000, end: 2000 },
+            { name: "Marketer", man: 0, int: 2000, end: 1000 },
+            { name: "Accountant", man: 0, int: 750, end: 1500 },
+            { name: "Florist", man: 500, int: 0, end: 1000 },
+            { name: "Arranger", man: 500, int: 1000, end: 0 },
+            { name: "Cleaner", man: 500, int: 0, end: 250 },
+            { name: "Apprentice", man: 250, int: 0, end: 500 },
+        ],
+        "Furniture Store": [
+            { name: "Trainer", man: 0, int: 19500, end: 9750 },
+            { name: "Marketer", man: 0, int: 13000, end: 6500 },
+            { name: "Manager", man: 0, int: 6500, end: 13000 },
+            { name: "Receptionist", man: 0, int: 5000, end: 10000 },
+            { name: "Delivery Driver", man: 8000, int: 0, end: 4000 },
+            { name: "Sales Clerk", man: 0, int: 3250, end: 6500 },
+            { name: "Cleaner", man: 3500, int: 0, end: 1750 },
+            { name: "Apprentice", man: 0, int: 750, end: 1500 },
+        ],
+        "Game Shop": [
+            { name: "Store Manager", man: 0, int: 3000, end: 6000 },
+            { name: "Marketer", man: 0, int: 6000, end: 3000 },
+            { name: "Game Advisor", man: 0, int: 4500, end: 2250 },
+            { name: "Accountant", man: 0, int: 2250, end: 4500 },
+            { name: "Clerk", man: 1500, int: 0, end: 3000 },
+            { name: "Cleaner", man: 1500, int: 0, end: 750 },
+        ],
+        "Gas Station": [
+            { name: "Trainer", man: 0, int: 70500, end: 35250 },
+            { name: "Manager", man: 0, int: 30000, end: 60000 },
+            { name: "Marketer", man: 0, int: 40000, end: 20000 },
+            { name: "Attendant", man: 0, int: 13000, end: 26000 },
+            { name: "Cleaner", man: 17500, int: 0, end: 8750 },
+        ],
+        "Gents Strip Club": [
+            { name: "Photographer", man: 0, int: 29000, end: 14500 },
+            { name: "Security", man: 29000, int: 0, end: 14500 },
+            { name: "Manager", man: 0, int: 14500, end: 29000 },
+            { name: "Bookkeeper", man: 0, int: 11000, end: 22000 },
+            { name: "Stripper", man: 7250, int: 0, end: 14500 },
+            { name: "Cleaner", man: 7500, int: 0, end: 3750 },
+        ],
+        "Grocery Store": [
+            { name: "Trainer", man: 0, int: 18000, end: 9000 },
+            { name: "Manager", man: 0, int: 6000, end: 12000 },
+            { name: "Marketer", man: 0, int: 12000, end: 6000 },
+            { name: "Accountant", man: 0, int: 4500, end: 9000 },
+            { name: "Delivery Driver", man: 7500, int: 0, end: 3750 },
+            { name: "Cashier", man: 3000, int: 0, end: 6000 },
+            { name: "Stock Clerk", man: 4500, int: 0, end: 2250 },
+            { name: "Cleaner", man: 3000, int: 0, end: 1500 },
+            { name: "Cart Attendant", man: 3000, int: 0, end: 1500 },
+        ],
+        "Gun Shop": [
+            { name: "Instructor", man: 0, int: 22500, end: 11250 },
+            { name: "Gunsmith", man: 15000, int: 7500, end: 0 },
+            { name: "Manager", man: 0, int: 7500, end: 15000 },
+            { name: "Marketer", man: 0, int: 15000, end: 7500 },
+            { name: "Bookkeeper", man: 0, int: 5750, end: 11500 },
+            { name: "Clerk", man: 3750, int: 0, end: 7500 },
+            { name: "Cleaner", man: 4000, int: 0, end: 2000 },
+        ],
+        "Hair Salon": [
+            { name: "Trainer", man: 0, int: 4500, end: 2250 },
+            { name: "Aesthetician", man: 0, int: 4500, end: 2250 },
+            { name: "Senior Stylist", man: 3000, int: 0, end: 1500 },
+            { name: "Receptionist", man: 0, int: 1250, end: 2500 },
+            { name: "Colorist", man: 2000, int: 0, end: 1000 },
+            { name: "Stylist", man: 1500, int: 0, end: 750 },
+            { name: "Nail Technician", man: 750, int: 0, end: 1500 },
+            { name: "Shampooist", man: 1000, int: 0, end: 500 },
+            { name: "Apprentice", man: 500, int: 0, end: 250 },
+        ],
+        "Ladies Strip Club": [
+            { name: "Photographer", man: 0, int: 33000, end: 16500 },
+            { name: "Manager", man: 0, int: 16500, end: 33000 },
+            { name: "Bookkeeper", man: 0, int: 12500, end: 25000 },
+            { name: "Security", man: 29000, int: 0, end: 14500 },
+            { name: "Male Stripper", man: 7250, int: 0, end: 14500 },
+            { name: "Cleaner", man: 8500, int: 0, end: 4250 },
+        ],
+        "Law Firm": [
+            { name: "Consultant", man: 0, int: 33000, end: 16500 },
+            { name: "Marketer", man: 0, int: 22000, end: 11000 },
+            { name: "Secretary", man: 0, int: 8250, end: 16500 },
+            { name: "Attorney", man: 0, int: 11000, end: 5500 },
+            { name: "Cleaner", man: 5500, int: 0, end: 2750 },
+            { name: "Assistant", man: 0, int: 2750, end: 5500 },
+        ],
+        "Lingerie Store": [
+            { name: "Human Resources", man: 0, int: 13500, end: 6750 },
+            { name: "Store Manager", man: 0, int: 4500, end: 9000 },
+            { name: "Lingerie Model", man: 0, int: 9000, end: 4500 },
+            { name: "Salesperson", man: 0, int: 2250, end: 4500 },
+            { name: "Cleaner", man: 2500, int: 0, end: 1250 },
+            { name: "Trainee", man: 0, int: 500, end: 1000 },
+        ],
+        "Logistics Management": [
+            { name: "Procurement Manager", man: 0, int: 140000, end: 70000 },
+            { name: "Supply Chain Manager", man: 0, int: 125000, end: 62500 },
+            { name: "Warehouse Manager", man: 0, int: 115000, end: 57500 },
+            { name: "Transport Coordinator", man: 0, int: 85000, end: 42500 },
+            { name: "Shift Manager", man: 0, int: 90000, end: 45000 },
+            { name: "Forklift Operator", man: 30000, int: 0, end: 60000 },
+            { name: "Driver", man: 28750, int: 0, end: 57500 },
+            { name: "Lumper", man: 45000, int: 0, end: 22500 },
+        ],
+        "Meat Warehouse": [
+            { name: "Supervisor", man: 0, int: 37500, end: 18750 },
+            { name: "Quality Controller", man: 12500, int: 25000, end: 0 },
+            { name: "Manager", man: 0, int: 12500, end: 25000 },
+            { name: "Assistant", man: 0, int: 9500, end: 19000 },
+            { name: "Retailer", man: 0, int: 12500, end: 6250 },
+            { name: "Butcher", man: 12500, int: 0, end: 6250 },
+            { name: "Packer", man: 9500, int: 0, end: 4750 },
+            { name: "Cleaner", man: 6500, int: 0, end: 3250 },
+            { name: "Apprentice Butcher", man: 3000, int: 0, end: 1500 },
+        ],
+        "Mechanic Shop": [
+            { name: "Trainer", man: 0, int: 25500, end: 12750 },
+            { name: "Manager", man: 0, int: 8500, end: 17000 },
+            { name: "Receptionist", man: 0, int: 6500, end: 13000 },
+            { name: "Technician", man: 8500, int: 0, end: 4250 },
+            { name: "Cleaner", man: 4500, int: 0, end: 2250 },
+            { name: "Apprentice Technician", man: 2000, int: 0, end: 1000 },
+        ],
+        "Mining Corporation": [
+            { name: "Secretary", man: 0, int: 39000, end: 78000 },
+            { name: "Site Manager", man: 0, int: 97000, end: 48750 },
+            { name: "Safety Inspector", man: 47500, int: 95000, end: 0 },
+            { name: "Mine Engineer", man: 0, int: 81000, end: 40500 },
+            { name: "Sales Executive", man: 0, int: 83000, end: 41500 },
+            { name: "Electrician", man: 39000, int: 0, end: 78000 },
+            { name: "Production Foreman", man: 39500, int: 0, end: 79000 },
+            { name: "Mill Operator", man: 75000, int: 0, end: 37500 },
+        ],
+        "Music Store": [
+            { name: "Trainer", man: 0, int: 10500, end: 5250 },
+            { name: "Musician", man: 4500, int: 9000, end: 0 },
+            { name: "Supervisor", man: 0, int: 3500, end: 7000 },
+            { name: "Bookkeeper", man: 0, int: 2750, end: 5500 },
+            { name: "Sales Assistant", man: 0, int: 1750, end: 3500 },
+            { name: "Cleaner", man: 2000, int: 0, end: 1000 },
+            { name: "Sales Apprentice", man: 0, int: 500, end: 1000 },
+        ],
+        "Nightclub": [
+            { name: "Trainer", man: 0, int: 81000, end: 40500 },
+            { name: "Manager", man: 0, int: 27000, end: 54000 },
+            { name: "Promoter", man: 0, int: 54000, end: 27000 },
+            { name: "Disk-jockey", man: 0, int: 40500, end: 20250 },
+            { name: "Personal Assistant", man: 0, int: 20250, end: 40500 },
+            { name: "Bouncer", man: 48000, int: 0, end: 24000 },
+            { name: "Bartender", man: 13500, int: 0, end: 27000 },
+            { name: "Barback", man: 10250, int: 0, end: 20500 },
+            { name: "Cleaner", man: 13500, int: 0, end: 6750 },
+        ],
+        "Oil Rig": [
+            { name: "Inspector", man: 0, int: 225000, end: 112500 },
+            { name: "Driller", man: 150000, int: 75000, end: 0 },
+            { name: "Sales Executive", man: 0, int: 131500, end: 65750 },
+            { name: "Motor Hand", man: 112500, int: 56250, end: 0 },
+            { name: "Secretary", man: 0, int: 56250, end: 112500 },
+            { name: "Derrick Hand", man: 94000, int: 0, end: 47000 },
+            { name: "Roughneck", man: 75000, int: 0, end: 37500 },
+        ],
+        "Private Security Firm": [
+            { name: "Chief Strategist", man: 0, int: 165000, end: 82500 },
+            { name: "Defense Consultant", man: 0, int: 135000, end: 67500 },
+            { name: "Team Leader", man: 110000, int: 0, end: 55000 },
+            { name: "Medic", man: 0, int: 90000, end: 45000 },
+            { name: "Disposal Engineer", man: 0, int: 85000, end: 42500 },
+            { name: "Comms Engineer", man: 0, int: 85000, end: 42500 },
+            { name: "Armorer", man: 40000, int: 0, end: 80000 },
+            { name: "Spokesperson", man: 0, int: 80000, end: 40000 },
+            { name: "Reconnaissance", man: 80000, int: 40000, end: 0 },
+            { name: "Security Contractor", man: 70000, int: 0, end: 35000 },
+            { name: "Company Liaison", man: 0, int: 57500, end: 115000 },
+        ],
+        "Property Broker": [
+            { name: "Broker Support", man: 0, int: 4500, end: 2250 },
+            { name: "Valuation Specialist", man: 0, int: 3000, end: 1500 },
+            { name: "Team Manager", man: 0, int: 1500, end: 3000 },
+            { name: "Graphic Designer", man: 0, int: 3000, end: 1500 },
+            { name: "Receptionist", man: 0, int: 1250, end: 2500 },
+            { name: "Property Broker", man: 0, int: 750, end: 1500 },
+            { name: "Cleaner", man: 1000, int: 0, end: 500 },
+            { name: "Associate Broker", man: 0, int: 250, end: 500 },
+        ],
+        "Pub": [
+            { name: "Trainer", man: 0, int: 9000, end: 4500 },
+            { name: "Manager", man: 0, int: 3000, end: 6000 },
+            { name: "Bouncer", man: 6000, int: 0, end: 3000 },
+            { name: "Promoter", man: 0, int: 6000, end: 3000 },
+            { name: "Bookkeeper", man: 0, int: 2250, end: 4500 },
+            { name: "Bartender", man: 1500, int: 0, end: 3000 },
+            { name: "Waiter", man: 1500, int: 0, end: 3000 },
+            { name: "Cleaner", man: 1500, int: 0, end: 750 },
+        ],
+        "Restaurant": [
+            { name: "Head Chef", man: 0, int: 2500, end: 5000 },
+            { name: "Sous Chef", man: 0, int: 4000, end: 2000 },
+            { name: "Head Waiter", man: 0, int: 2000, end: 4000 },
+            { name: "Chef", man: 1500, int: 3000, end: 0 },
+            { name: "Line Cook", man: 1250, int: 2500, end: 0 },
+            { name: "Waiter", man: 1250, int: 0, end: 2500 },
+            { name: "Kitchen Assistant", man: 1500, int: 0, end: 750 },
+            { name: "Dishwasher", man: 1500, int: 0, end: 750 },
+            { name: "Apprentice Chef", man: 750, int: 1500, end: 0 },
+        ],
+        "Software Corporation": [
+            { name: "Consultant", man: 0, int: 72000, end: 36000 },
+            { name: "Lead Developer", man: 0, int: 24000, end: 48000 },
+            { name: "Marketer", man: 0, int: 48000, end: 24000 },
+            { name: "Analyst", man: 0, int: 18000, end: 36000 },
+            { name: "Developer", man: 0, int: 24000, end: 12000 },
+            { name: "Cleaner", man: 12000, int: 0, end: 6000 },
+            { name: "Graphic Designer", man: 0, int: 18000, end: 9000 },
+            { name: "Tester", man: 0, int: 12000, end: 6000 },
+            { name: "Apprentice", man: 0, int: 6000, end: 3000 },
+        ],
+        "Sweet Shop": [
+            { name: "Manager", man: 0, int: 2000, end: 4000 },
+            { name: "Marketer", man: 0, int: 4000, end: 2000 },
+            { name: "Bookkeeper", man: 0, int: 1500, end: 3000 },
+            { name: "Confectionist", man: 0, int: 2500, end: 1250 },
+            { name: "Clerk", man: 1000, int: 0, end: 2000 },
+            { name: "Packager", man: 750, int: 0, end: 1500 },
+            { name: "Cleaner", man: 1000, int: 0, end: 500 },
+        ],
+        "Television Network": [
+            { name: "Anchor", man: 0, int: 132000, end: 66000 },
+            { name: "Attorney", man: 0, int: 132000, end: 66000 },
+            { name: "Marketer", man: 0, int: 132000, end: 66000 },
+            { name: "Writer", man: 0, int: 115500, end: 57750 },
+            { name: "Secretary", man: 0, int: 49500, end: 99000 },
+            { name: "Producer", man: 0, int: 99000, end: 49500 },
+            { name: "Reporter", man: 0, int: 82500, end: 41250 },
+            { name: "Camera Operator", man: 24750, int: 49500, end: 0 },
+            { name: "Sales Executive", man: 0, int: 24750, end: 49500 },
+            { name: "Stagehand", man: 33000, int: 0, end: 16500 },
+            { name: "Cleaner", man: 33000, int: 0, end: 16500 },
+            { name: "Programmer", man: 0, int: 66000, end: 33000 },
+        ],
+        "Theater": [
+            { name: "Manager", man: 0, int: 40000, end: 80000 },
+            { name: "Marketing Manager", man: 0, int: 80000, end: 40000 },
+            { name: "Technician", man: 60000, int: 30000, end: 0 },
+            { name: "Accountant", man: 0, int: 30000, end: 60000 },
+            { name: "Programmer", man: 0, int: 50000, end: 25000 },
+            { name: "Ticketing Agent", man: 0, int: 10000, end: 20000 },
+            { name: "Usher", man: 10000, int: 0, end: 20000 },
+            { name: "Janitor", man: 20000, int: 0, end: 10000 },
+        ],
+        "Toy Shop": [
+            { name: "Training Advisor", man: 0, int: 15000, end: 7500 },
+            { name: "Store Manager", man: 0, int: 5000, end: 10000 },
+            { name: "Marketing Executive", man: 0, int: 10000, end: 5000 },
+            { name: "Office Clerk", man: 0, int: 3750, end: 7500 },
+            { name: "Sales Assistant", man: 2500, int: 0, end: 5000 },
+            { name: "Stock Clerk", man: 4000, int: 0, end: 2000 },
+            { name: "Cleaner", man: 2500, int: 0, end: 1250 },
+        ],
+        "Zoo": [
+            { name: "Consultant", man: 0, int: 174000, end: 87000 },
+            { name: "Manager", man: 0, int: 58000, end: 116000 },
+            { name: "Photographer", man: 0, int: 116000, end: 58000 },
+            { name: "Veterinarian", man: 58000, int: 116000, end: 0 },
+            { name: "Bookkeeper", man: 0, int: 43500, end: 87000 },
+            { name: "Animal Trainer", man: 36250, int: 72500, end: 0 },
+            { name: "Zoo Keeper", man: 58000, int: 0, end: 29000 },
+            { name: "Aquarist", man: 0, int: 29000, end: 58000 },
+            { name: "Cashier", man: 0, int: 14500, end: 29000 },
+            { name: "Intern", man: 14500, int: 0, end: 7250 },
+        ],
     };
 
 
@@ -605,10 +939,34 @@
     }
 
     function getPositionsForType(companyType) {
-        const typeKey = safeStr(companyType).toLowerCase();
+        let typeKey = safeStr(companyType);
+        if (!typeKey && userInfo && userInfo.company_type != null) {
+            typeKey = safeStr(userInfo.company_type);
+        }
         if (!typeKey) return null;
-        const key = Object.keys(COMPANY_POSITIONS).find(k => k.toLowerCase() === typeKey);
+        // Numeric type id → name
+        if (/^\d+$/.test(typeKey)) {
+            const named = resolveCompanyTypeName(typeKey, null);
+            if (named) typeKey = named;
+        } else {
+            // Ensure canonical name when possible
+            const named = resolveCompanyTypeName(typeKey, null);
+            if (named && COMPANY_POSITIONS[named]) typeKey = named;
+        }
+        const lower = typeKey.toLowerCase();
+        let key = Object.keys(COMPANY_POSITIONS).find(k => k.toLowerCase() === lower);
+        if (!key) {
+            // Fuzzy: substring match (e.g. "gents strip" → Gents Strip Club)
+            key = Object.keys(COMPANY_POSITIONS).find(k => {
+                const kl = k.toLowerCase();
+                return kl.includes(lower) || lower.includes(kl);
+            });
+        }
         return key ? COMPANY_POSITIONS[key] : null;
+    }
+
+    function listSupportedCompanyTypes() {
+        return Object.keys(COMPANY_POSITIONS).sort();
     }
 
     function isPriorityRoleName(name) {
@@ -1267,6 +1625,17 @@
             data.company_name || null
         );
 
+        // Employees often only get type on user/job — not on limited company profile
+        let companyType = job.company_type != null ? job.company_type
+            : (job.companyType != null ? job.companyType
+            : (profile.company_type != null ? profile.company_type
+            : (data.company_type != null ? data.company_type : null)));
+        // v2 sometimes nests type as object
+        if (companyType && typeof companyType === 'object') {
+            companyType = companyType.id != null ? companyType.id
+                : (companyType.name || companyType.type || null);
+        }
+
         let position = safeStr(
             job.position || job.job || job.role ||
             profile.position || profile.job ||
@@ -1290,6 +1659,7 @@
             position: position || (inCompany ? 'Employee' : 'None'),
             company_id: companyId,
             company_name: companyName,
+            company_type: companyType,
             isDirector,
             inCompany
         };
@@ -1305,6 +1675,12 @@
             userInfo.isDirector = true;
             userInfo.company_name = userInfo.company_name || c.name || null;
             userInfo.company_id = userInfo.company_id || Number(c.ID || c.id || 0) || userInfo.company_id;
+        }
+        if (userInfo && (c.company_type != null || c.type != null)) {
+            const t = c.company_type != null ? c.company_type : c.type;
+            userInfo.company_type = t && typeof t === 'object'
+                ? (t.id != null ? t.id : t.name)
+                : t;
         }
         // detailed / stock only succeed for directors
         if (data.company_bank != null || data.company_stock || data.stock ||
@@ -1527,6 +1903,82 @@
         return named || raw;
     }
 
+    /**
+     * Resolve company type for peer list (works for employees).
+     * Sources: company profile, userInfo.company_type (from job), cached peer entry.
+     */
+    function collectCompanyTypeCandidates() {
+        const p = (companyData && (companyData.company || companyData.profile)) || {};
+        const candidates = [];
+        const push = (v) => {
+            if (v == null || v === '') return;
+            if (typeof v === 'object') {
+                if (v.id != null) candidates.push(v.id);
+                if (v.name) candidates.push(v.name);
+                if (v.type != null && typeof v.type !== 'object') candidates.push(v.type);
+                return;
+            }
+            candidates.push(v);
+        };
+        push(p.company_type);
+        push(p.type);
+        push(p.company_type_id);
+        push(p.type_id);
+        if (userInfo) {
+            push(userInfo.company_type);
+            push(userInfo.company_type_id);
+        }
+        // Last peer report / cache may remember type name
+        if (lastPeerReport && lastPeerReport.typeName) push(lastPeerReport.typeName);
+        return candidates;
+    }
+
+    function resolveOwnTypeNameSync() {
+        const cands = collectCompanyTypeCandidates();
+        for (const c of cands) {
+            const name = resolveCompanyTypeName(c, null);
+            if (name && resolveYataTypeId(name)) return name;
+            if (name && !/^\d+$/.test(String(name))) return name;
+        }
+        // Numeric type id alone
+        for (const c of cands) {
+            const id = resolveYataTypeId(c);
+            if (id) return resolveCompanyTypeName(id, null) || String(id);
+        }
+        return '';
+    }
+
+    /** If type still unknown, fetch public profile for our company_id. */
+    async function ensureOwnCompanyType() {
+        let typeName = resolveOwnTypeNameSync();
+        if (typeName && resolveYataTypeId(typeName)) return typeName;
+
+        const cid = Number(
+            (userInfo && userInfo.company_id) ||
+            ((companyData && (companyData.company || companyData.profile) || {}).ID) ||
+            ((companyData && (companyData.company || companyData.profile) || {}).id) || 0
+        ) || 0;
+        if (!cid) return typeName || '';
+
+        try {
+            const data = await fetchPeerCompany(cid);
+            const meta = extractCompanyMeta(data);
+            const c = (meta && meta.c) || data.company || data.profile || data || {};
+            let t = c.company_type != null ? c.company_type : c.type;
+            if (t && typeof t === 'object') t = t.id != null ? t.id : (t.name || null);
+            typeName = resolveCompanyTypeName(t, c) || resolveCompanyTypeName(meta && meta.cType, c) || '';
+            if (userInfo && t != null) userInfo.company_type = t;
+            // Stash onto companyData so later renders see it
+            if (companyData && typeName) {
+                const root = companyData.company || companyData.profile || companyData;
+                if (root && root.company_type == null && t != null) root.company_type = t;
+            }
+        } catch (e) {
+            console.warn('[TCM] ensureOwnCompanyType profile fetch failed', e && e.message);
+        }
+        return typeName || resolveOwnTypeNameSync() || '';
+    }
+
     function parseYataCompanyTable(html) {
         if (!html || typeof html !== 'string') return [];
         const rows = [];
@@ -1648,28 +2100,133 @@
         return counts;
     }
 
-    /** EE promotion projection: approx trains to next effectiveness tier (50/100/150/200). */
-    function eePromotionHints(empList) {
+
+    /** Company day key (rolls ~18:00 TCT/UTC). */
+    function tornCompanyDayKey(d) {
+        const t = d ? new Date(d) : new Date();
+        const shifted = new Date(t.getTime() - 18 * 3600 * 1000);
+        return shifted.toISOString().slice(0, 10);
+    }
+    function loadTrainExclude() {
+        try {
+            const o = JSON.parse(GM_getValue(TRAIN_EXCLUDE_KEY, '{}') || '{}');
+            return o && typeof o === 'object' ? o : {};
+        } catch (e) { return {}; }
+    }
+    function saveTrainExclude(map) {
+        try { GM_setValue(TRAIN_EXCLUDE_KEY, JSON.stringify(map || {})); } catch (e) {}
+    }
+    function loadSettlingDays() {
+        const n = Number(GM_getValue(TRAIN_SETTLE_KEY, 3));
+        return isFinite(n) && n >= 0 && n <= 30 ? Math.floor(n) : 3;
+    }
+    function saveSettlingDays(n) {
+        const v = Math.max(0, Math.min(30, Math.floor(Number(n) || 0)));
+        GM_setValue(TRAIN_SETTLE_KEY, v);
+        return v;
+    }
+    function trainerExtraTrains(empList) {
+        let extra = 0, trainers = 0;
+        getEmpList(empList).forEach(e => {
+            const pos = safeStr(e.position).toLowerCase();
+            if (!(/trainer|human resources|^hr\b|hr officer|training advis/.test(pos))) return;
+            trainers++;
+            const eff = Number(empEffectiveness(e)) || 0;
+            let add = 0;
+            const tiers = Object.keys(TRAINER_TRAINS).map(Number).sort((a, b) => b - a);
+            for (const t of tiers) {
+                if (eff >= t) { add = TRAINER_TRAINS[t]; break; }
+            }
+            extra += add;
+        });
+        return { extra, trainers };
+    }
+    function trainsLoggedToday(id) {
+        const log = loadTrainLog();
+        const e = log[String(id)];
+        if (!e) return 0;
+        const day = tornCompanyDayKey();
+        if (e.byDay && typeof e.byDay === 'object' && e.byDay[day] != null) {
+            return Number(e.byDay[day]) || 0;
+        }
+        if (e.lastTrain && tornCompanyDayKey(e.lastTrain) === day) return 1;
+        return 0;
+    }
+    /**
+     * Simulate director trains on current position until total EE crosses next tier.
+     */
+    function trainsToNextEffTier(e, companyType) {
+        if (!e) return null;
+        const posName = safeStr(e.position);
+        if (/director/i.test(posName)) return null;
+        const positions = getPositionsForType(companyType) || [];
+        let pos = positions.find(p => p.name.toLowerCase() === posName.toLowerCase());
+        if (!pos && positions.length) {
+            const norm = normalizePositionName(posName);
+            pos = positions.find(p => normalizePositionName(p.name) === norm || p.name.toLowerCase() === norm);
+        }
+        if (!pos) return null;
+        const st = empStats(e);
+        const ps = positionPrimarySecondary(pos);
+        if (!ps.primary) return null;
+        const priKey = ps.primary.key;
+        const secKey = ps.secondary ? ps.secondary.key : null;
+        let priStat = st[priKey] || 0;
+        let secStat = secKey ? (st[secKey] || 0) : 0;
+        const baseWs = calcPositionEff(st.man, st.int, st.end, pos);
+        const totalEff = Number(empEffectiveness(e));
+        const bonuses = (totalEff != null && isFinite(totalEff)) ? (totalEff - baseWs) : 0;
+        const startEff = totalEff != null && isFinite(totalEff) ? totalEff : baseWs;
+        const next = EE_TIERS.find(t => t > startEff);
+        if (!next) return { trains: 0, next: null, startEff, pos: pos.name };
+        let trains = 0;
+        let p = priStat, s = secStat;
+        while (trains < 500) {
+            trains++;
+            p += TRAIN_PRIMARY;
+            if (secKey) s += TRAIN_SECONDARY;
+            const man = priKey === 'man' ? p : (secKey === 'man' ? s : st.man);
+            const intv = priKey === 'int' ? p : (secKey === 'int' ? s : st.int);
+            const endv = priKey === 'end' ? p : (secKey === 'end' ? s : st.end);
+            const ws = calcPositionEff(man, intv, endv, pos);
+            if (ws + bonuses >= next) {
+                return { trains, next, startEff, projected: Math.round((ws + bonuses) * 10) / 10, pos: pos.name };
+            }
+        }
+        return { trains: null, next, startEff, pos: pos.name, capped: true };
+    }
+
+    /** EE promotion projection using simulated trains-to-tier when possible. */
+    function eePromotionHints(empList, companyType) {
         const out = [];
         getEmpList(empList).forEach(e => {
             if (!e) return;
             const pos = normalizePositionName(e.position || '');
             if (pos === 'director') return;
-            let eff = 0;
-            if (e.effectiveness && typeof e.effectiveness === 'object') {
-                eff = Number(e.effectiveness.total || e.effectiveness.value || 0) || 0;
-            } else {
-                eff = Number(e.effectiveness || e.eff || e.effectiveness_total || 0) || 0;
+            const sim = trainsToNextEffTier(e, companyType);
+            if (sim && sim.trains != null && sim.next) {
+                out.push({
+                    name: safeStr(e.name || e.playername) || 'Employee',
+                    eff: sim.startEff,
+                    next: sim.next,
+                    gap: Math.max(0, sim.next - (sim.startEff || 0)),
+                    trains: sim.trains,
+                    pos
+                });
+                return;
             }
+            let eff = Number(empEffectiveness(e)) || 0;
             if (eff <= 0) return;
             const next = EE_TIERS.find(t => t > eff);
             if (!next) return;
-            const gap = next - eff;
-            const trains = Math.max(1, Math.ceil(gap / TRAIN_PRIMARY));
-            const name = safeStr(e.name || e.playername) || 'Employee';
-            out.push({ name, eff, next, gap, trains, pos });
+            out.push({
+                name: safeStr(e.name || e.playername) || 'Employee',
+                eff, next, gap: next - eff,
+                trains: Math.max(1, Math.ceil((next - eff) / TRAIN_PRIMARY)),
+                pos
+            });
         });
-        out.sort((a, b) => a.gap - b.gap);
+        out.sort((a, b) => (a.trains || 99) - (b.trains || 99) || a.gap - b.gap);
         return out.slice(0, 8);
     }
 
@@ -1888,7 +2445,7 @@
     async function importPeersFromTorn(companyType) {
         const typeName = resolveCompanyTypeName(companyType) || safeStr(companyType);
         const typeId = resolveYataTypeId(typeName || companyType); // same numeric map
-        if (!typeId) throw new Error('Unknown company type id for: ' + companyType);
+        if (!typeId) throw new Error('Unknown company type id for: ' + (companyType != null && companyType !== '' ? companyType : '(empty — employee profile missing company_type)'));
 
         const data = await apiGetCompanyId(typeId, 'companies');
         const rows = parseTornCompaniesList(data);
@@ -1932,7 +2489,7 @@
         };
     }
 
-    /** Filter companies for benchmark (Solenya-style same / above / top / ten). */
+    /** Filter companies for benchmark (same / above / top / ten). */
     function filterPeerPool(rows, opts) {
         const filter = (opts && opts.filter) || loadBenchFilter();
         const sameSize = !!(opts && opts.sameSize != null ? opts.sameSize : loadBenchSameSize());
@@ -2142,7 +2699,7 @@
     }
 
     /**
-     * Peer company data via Torn API only (Solenya/GF pattern):
+     * Peer company data via Torn API only:
      * 1) profile → name, rating, income, hired/capacity
      * 2) employees selection → company_employees with position names
      * Never stops after profile alone (that was dropping role data).
@@ -2208,17 +2765,35 @@
         const force = !!(opts && opts.force);
 
         const p = (companyData && (companyData.company || companyData.profile)) || {};
-        const typeName = resolveCompanyTypeName(p.company_type || p.type || '', p);
+        setStatus((force ? 'Force update. ' : '') + 'Resolving company type…');
+        let typeName = await ensureOwnCompanyType();
+        if (!typeName) {
+            typeName = resolveCompanyTypeName(p.company_type || p.type || '', p) ||
+                resolveCompanyTypeName(userInfo && userInfo.company_type, p);
+        }
+        const typeId = resolveYataTypeId(typeName);
         const ownId = (userInfo && userInfo.company_id) || p.ID || p.id || 0;
         const ownName = safeStr(p.name || (userInfo && userInfo.company_name) || '');
         let sourceNote = force ? 'Force update. ' : '';
         let allTenStarIds = [];
 
+        if (!typeName || !typeId) {
+            showErrorBox('Cannot resolve company type', [
+                'Peer lists need your company <strong>type</strong> (e.g. Pub, Hair Salon).',
+                'As an employee the API sometimes omits type on the company blob — the script now reads <code>user/job.company_type</code> and can fetch your company profile by ID.',
+                'Try <strong>Refresh</strong> on the main dashboard first, then Refresh Peers again.',
+                'Detected company id: <strong>' + (ownId || 'none') + '</strong> · name: <strong>' +
+                    (ownName || 'unknown') + '</strong>'
+            ]);
+            setStatus('No company type — cannot load peers', true);
+            return;
+        }
+
         // Weekly full 10★ list: JSONBin shared cache; Torn API only after Sun 18:00 TCT week rollover
         // force:true always re-fetches Torn and repopulates cache
         try {
-            setStatus(sourceNote + 'Loading weekly 10★ peer list (JSONBin / Torn)…');
-            const weekly = await ensureWeeklyPeerList(typeName || p.company_type || p.type, force);
+            setStatus(sourceNote + 'Loading weekly 10★ peer list for ' + typeName + ' (JSONBin / Torn)…');
+            const weekly = await ensureWeeklyPeerList(typeName, force);
             allTenStarIds = weekly.ids || [];
             sourceNote += (weekly.refreshed ? 'Torn refresh' : (weekly.source || 'cache')) +
                 ': ' + allTenStarIds.length + '×10★' +
@@ -2229,7 +2804,7 @@
             sourceNote = 'Weekly list failed (' + (e && e.message ? e.message : 'error') + '). ';
             try {
                 setStatus(sourceNote + 'Trying YATA…');
-                const yata = await importPeersFromYata(typeName || p.company_type || p.type);
+                const yata = await importPeersFromYata(typeName);
                 allTenStarIds = yata.tenStarIds.length ? yata.tenStarIds : yata.allIds;
                 const weekKey = peerListWeekKey();
                 setPeerListForType(typeName || String(yata.typeId), {
@@ -2249,7 +2824,7 @@
             }
         }
 
-        // Benchmark filters (same mechanism as Greasy Fork TCM): list from API, then filter
+        // Benchmark filters: list from API, then filter
         const entry = getPeerListEntry(typeName) || getPeerListEntry(String(typeName).toLowerCase()) || {};
         let rowsMeta = Array.isArray(entry.rows) ? entry.rows.slice() : [];
         if (!rowsMeta.length && allTenStarIds.length) {
@@ -2307,7 +2882,7 @@
                 if (meta.capacity != null) capacity = meta.capacity;
                 const c = meta.c || {};
                 if (c.weekly_income != null) income = Number(c.weekly_income);
-                // employees selection (public) — same mechanism as Greasy Fork TCM
+                // employees selection (public role mix)
                 const empList = normalizeEmployeeList(data);
                 const apiRoles = countRoles(empList);
                 const apiCount = Object.values(apiRoles).reduce((a, b) => a + b, 0);
@@ -2499,7 +3074,7 @@
             · IDs: <strong>${r.idsCount != null ? r.idsCount : cacheInfo.ids.length}</strong>
             · List: <strong>${fmtTime(r.idsCachedAt || cacheInfo.updated)}</strong>
             · Profiles: <strong>${fmtTime(r.updated)}</strong>${rankStr}<br>
-            Source: Torn API <code>companies</code> + <code>employees</code> (same approach as Greasy Fork TCM)
+            Source: Torn API <code>companies</code> + <code>employees</code>
         </div>`;
 
         if (!r.peerCount) {
@@ -2583,6 +3158,176 @@
             <button type="button" class="tcm-btn" id="tcm-peers-force" title="Clear peer cache and rebuild 10★ list from Torn API">Force Update</button>
         </div>` + renderPeerSectionHtml();
         wirePeerButtons();
+    }
+
+
+    function wireTrainCalculator() {
+        const empSel = document.getElementById('tcm-tc-emp');
+        const posSel = document.getElementById('tcm-tc-pos');
+        const result = document.getElementById('tcm-tc-result');
+        if (!posSel || !result) return;
+
+        function num(id) {
+            const el = document.getElementById(id);
+            const v = el ? Number(el.value) : 0;
+            return isFinite(v) && v >= 0 ? v : 0;
+        }
+        function setNum(id, v) {
+            const el = document.getElementById(id);
+            if (el) el.value = String(Math.max(0, Math.round(Number(v) || 0)));
+        }
+        function selectedPos() {
+            const opt = posSel.options[posSel.selectedIndex];
+            if (!opt || !opt.value) return null;
+            return {
+                name: opt.value,
+                man: Number(opt.getAttribute('data-man')) || 0,
+                int: Number(opt.getAttribute('data-int')) || 0,
+                end: Number(opt.getAttribute('data-end')) || 0
+            };
+        }
+        function fillFromEmployee() {
+            if (!empSel) return;
+            const opt = empSel.options[empSel.selectedIndex];
+            if (!opt || !opt.value) return;
+            setNum('tcm-tc-cman', opt.getAttribute('data-man'));
+            setNum('tcm-tc-cint', opt.getAttribute('data-int'));
+            setNum('tcm-tc-cend', opt.getAttribute('data-end'));
+            const posName = opt.getAttribute('data-pos') || '';
+            if (posName && posSel) {
+                for (let i = 0; i < posSel.options.length; i++) {
+                    if (posSel.options[i].value.toLowerCase() === posName.toLowerCase()) {
+                        posSel.selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+        function useRoleReqs() {
+            const pos = selectedPos();
+            if (!pos) return;
+            setNum('tcm-tc-tman', pos.man);
+            setNum('tcm-tc-tint', pos.int);
+            setNum('tcm-tc-tend', pos.end);
+        }
+        function runCalc() {
+            const pos = selectedPos();
+            if (!pos) {
+                result.innerHTML = '<span class="tcm-bad">Select a position (company type must have a position table).</span>';
+                return;
+            }
+            const cur = { man: num('tcm-tc-cman'), int: num('tcm-tc-cint'), end: num('tcm-tc-cend') };
+            const tgt = { man: num('tcm-tc-tman'), int: num('tcm-tc-tint'), end: num('tcm-tc-tend') };
+            if (tgt.man + tgt.int + tgt.end <= 0) {
+                result.innerHTML = '<span class="tcm-warn">Set target stats (or click “Use role requirements as target”).</span>';
+                return;
+            }
+            const r = calcMinDirectorTrains(cur, tgt, pos);
+            if (!r.ok) {
+                result.innerHTML = '<span class="tcm-bad">' + (r.error || 'Cannot calculate') + '</span>';
+                return;
+            }
+            const ps = positionPrimarySecondary(pos);
+            const priL = (ps.primary && ps.primary.key || '').toUpperCase();
+            const secL = (ps.secondary && ps.secondary.key || '').toUpperCase();
+            let html = '<div style="line-height:1.55">';
+            html += '<strong>Minimum director trains: <span class="tcm-good" style="font-size:15px">' + r.trains + '</span></strong>';
+            html += ' while trained as <strong>' + (pos.name || '') + '</strong>';
+            html += '<br><span style="color:#aaa;font-size:11px">Each train: +' + TRAIN_PRIMARY + ' ' + priL +
+                (secL ? (' + ' + TRAIN_SECONDARY + ' ' + secL) : '') + '</span>';
+            html += '<br>Primary gap (' + priL + '): ' + r.priGap + ' → ' + r.priTrains + ' train(s) at +' + TRAIN_PRIMARY + '/train';
+            if (r.secKey) {
+                html += '<br>Secondary gap (' + secL + '): ' + r.secGap + ' → ' + r.secTrains + ' train(s) at +' + TRAIN_SECONDARY + '/train';
+            }
+            html += '<br>Trains needed = max(primary, secondary) = <strong>' + r.trains + '</strong>';
+            html += '<br>Stats after ' + r.trains + ' train(s): MAN ' + r.after.man + ' · INT ' + r.after.int + ' · END ' + r.after.end;
+            // Optional days estimate from company trains/day
+            try {
+                const root = (companyData && (companyData.company || companyData.profile)) || {};
+                const est = estimateDailyTrains(root, getEmpList(companyData || {}));
+                if (est.daily > 0 && r.trains > 0) {
+                    const days = Math.ceil(r.trains / est.daily);
+                    html += '<br>At ~' + est.daily + ' trains/day (★' + est.rating +
+                        (est.hasTrainer ? ' + trainer' : '') + '): about <strong>' + days + ' day(s)</strong> if all trains go to this person.';
+                }
+            } catch (e) { /* ignore */ }
+            if (r.unreachable && r.unreachable.length) {
+                html += '<br><span class="tcm-warn">Cannot raise via this role:</span> ';
+                html += r.unreachable.map(u => u.key.toUpperCase() + ' (+' + u.need + ' needed)').join('; ');
+                html += '.';
+            }
+            if (r.trains === 0 && !(r.unreachable && r.unreachable.length)) {
+                html += '<br><span class="tcm-good">Already at or above primary/secondary targets for this role.</span>';
+            }
+
+            // Recommend best training role when current role misses a wanted stat (or is suboptimal)
+            try {
+                const pRoot = (companyData && (companyData.company || companyData.profile)) || {};
+                let cType = resolveCompanyTypeName(pRoot.company_type || pRoot.type, pRoot) || '';
+                if (!cType && userInfo) cType = resolveCompanyTypeName(userInfo.company_type, pRoot) || '';
+                const path = recommendTrainingPath(cur, tgt, cType, pos.name);
+                if (path.best) {
+                    const b = path.best;
+                    const selMisses = r.unreachable && r.unreachable.length;
+                    const different = b.name.toLowerCase() !== String(pos.name || '').toLowerCase();
+                    if (selMisses || (different && path.switchRecommended)) {
+                        html += '<div style="margin-top:8px;padding:8px;border-radius:6px;background:rgba(80,140,220,0.12);border:1px solid rgba(80,140,220,0.35)">';
+                        html += '<strong style="color:#9cf">Recommended training role:</strong> <span class="tcm-good">' + b.name + '</span>';
+                        html += ' — <strong>' + b.trains + '</strong> train(s)';
+                        html += '<br><span style="font-size:11px;color:#bbb">Covers ' +
+                            b.covered.map(k => k.toUpperCase()).join(' + ') +
+                            (b.missed.length ? ('; · still misses ' + b.missed.map(k => k.toUpperCase()).join(', ')) : ' (all needed stats)') +
+                            '</span>';
+                        if (b.after) {
+                            html += '<br><span style="font-size:11px">After those trains: MAN ' + b.after.man +
+                                ' · INT ' + b.after.int + ' · END ' + b.after.end + '</span>';
+                        }
+                        if (path.alts && path.alts.length) {
+                            html += '<br><span style="font-size:11px;color:#f0c674">Also for missing stats:</span> ';
+                            html += path.alts.map(a =>
+                                a.stat.toUpperCase() + ' → <strong>' + a.role + '</strong> (~' + a.trains + ' trains)'
+                            ).join('; ');
+                            html += '<br><span style="font-size:10px;color:#888">No single role trains all three stats — switch roles between train batches if you need the third.</span>';
+                        }
+                        html += '<br><button type="button" class="tcm-btn secondary" id="tcm-tc-apply-best" style="margin-top:6px;padding:2px 8px;font-size:11px">Use recommended role</button>';
+                        html += '</div>';
+                    } else if (!selMisses && !different) {
+                        html += '<br><span class="tcm-good">Selected role is optimal (or tied) for these targets among company positions.</span>';
+                    }
+                }
+            } catch (e) {
+                console.warn('[TCM] train role recommend', e);
+            }
+
+            html += '</div>';
+            result.innerHTML = html;
+
+            const applyBest = document.getElementById('tcm-tc-apply-best');
+            if (applyBest) {
+                applyBest.onclick = () => {
+                    try {
+                        const pRoot = (companyData && (companyData.company || companyData.profile)) || {};
+                        let cType = resolveCompanyTypeName(pRoot.company_type || pRoot.type, pRoot) || '';
+                        if (!cType && userInfo) cType = resolveCompanyTypeName(userInfo.company_type, pRoot) || '';
+                        const path = recommendTrainingPath(cur, tgt, cType, pos.name);
+                        if (!path.best || !posSel) return;
+                        for (let i = 0; i < posSel.options.length; i++) {
+                            if (posSel.options[i].value.toLowerCase() === path.best.name.toLowerCase()) {
+                                posSel.selectedIndex = i;
+                                break;
+                            }
+                        }
+                        runCalc();
+                    } catch (e2) { /* ignore */ }
+                };
+            }
+        }
+
+        if (empSel) empSel.onchange = fillFromEmployee;
+        const useReq = document.getElementById('tcm-tc-use-req');
+        if (useReq) useReq.onclick = () => { useRoleReqs(); runCalc(); };
+        const calcBtn = document.getElementById('tcm-tc-calc');
+        if (calcBtn) calcBtn.onclick = runCalc;
     }
 
     function wirePeerButtons() {
@@ -4566,9 +5311,16 @@
     function markEmployeeTrained(employeeId) {
         const log = loadTrainLog();
         const id = String(employeeId);
-        if (!log[id]) log[id] = { trains: 0, lastTrain: 0 };
+        if (!log[id]) log[id] = { trains: 0, lastTrain: 0, byDay: {} };
+        if (!log[id].byDay || typeof log[id].byDay !== 'object') log[id].byDay = {};
         log[id].trains = (log[id].trains || 0) + 1;
         log[id].lastTrain = Date.now();
+        const day = tornCompanyDayKey();
+        log[id].byDay[day] = (Number(log[id].byDay[day]) || 0) + 1;
+        try {
+            const keys = Object.keys(log[id].byDay).sort();
+            while (keys.length > 21) delete log[id].byDay[keys.shift()];
+        } catch (e) {}
         saveTrainLog(log);
         if (companyData) render(companyData);
         setStatus('Logged train for employee #' + id + (jsonbinId ? ' — Data Sync…' : ''));
@@ -4738,15 +5490,14 @@
 
     function estimateDailyTrains(p, empList) {
         const rating = Number(p.rating || p.stars || 0) || 0;
-        // Base trains/day ≈ star rating; Trainer/HR adds more (approximate +1 if any effective trainer present)
-        let daily = rating;
-        let hasTrainer = false;
-        empList.forEach(e => {
-            const pos = safeStr(e.position).toLowerCase();
-            if (pos.includes('trainer') || pos.includes('hr officer') || pos === 'hr') hasTrainer = true;
-        });
-        if (hasTrainer) daily += 1; // conservative; real bonus scales with trainer effectiveness
-        return { daily, rating, hasTrainer };
+        const tx = trainerExtraTrains(empList);
+        return {
+            daily: rating + tx.extra,
+            rating,
+            hasTrainer: tx.trainers > 0,
+            trainerExtra: tx.extra,
+            trainers: tx.trainers
+        };
     }
 
     function buildSmartTraining(p, employees, companyType) {
@@ -4754,6 +5505,8 @@
         const trainEst = estimateDailyTrains(p, list);
         const log = loadTrainLog();
         const mode = trainMode === 'star' ? 'star' : 'fair';
+        const exclude = loadTrainExclude();
+        const settleDays = loadSettlingDays();
 
         // Score each employee for training priority
         const scored = list.map(e => {
@@ -4766,61 +5519,122 @@
             const eff = empEffectiveness(e);
             const parts = empEffParts(e);
             const logged = log[String(id)] ? (log[String(id)].trains || 0) : 0;
+            const loggedToday = trainsLoggedToday(id);
             const fairShare = days;
             const trainRatio = days > 0 ? logged / days : logged;
+            const excluded = !!exclude[String(id)];
+            const settling = days < settleDays;
+            const isDirector = /director/i.test(safeStr(e.position));
             let priority = 0;
 
-            if (mode === 'star') {
-                // Star push: people closest below EE tiers, low WS, high addiction drag
+            if (excluded || isDirector) {
+                priority = -1e9;
+            } else if (settling) {
+                priority = -1e6 + days; // still sortable but not planned
+            } else if (mode === 'star') {
                 if (eff != null) {
-                    // Distance under next common breakpoint (100 / 110)
                     const nextTier = eff < 100 ? 100 : (eff < 110 ? 110 : 120);
                     const gap = Math.max(0, nextTier - eff);
                     priority += gap * 4;
-                    if (eff >= 100 && eff < 105) priority += 15; // near over-100, finish push
+                    if (eff >= 100 && eff < 105) priority += 15;
                 } else {
                     priority += (90 - Math.min(wsEff, 90)) * 3;
                 }
                 priority += (90 - Math.min(wsEff, 90)) * 1.5;
-                if (parts.addiction != null && Math.abs(parts.addiction) >= 5) {
-                    priority *= 0.7; // rehab before dumping trains into addicts
+                if (parts.addiction != null && Math.abs(parts.addiction) >= 5) priority *= 0.7;
+                // Prefer fewer trains-to-tier when close
+                const sim = trainsToNextEffTier(e, companyType);
+                if (sim && sim.trains != null && sim.trains > 0 && sim.trains <= 15) {
+                    priority += (16 - sim.trains) * 2;
                 }
-                if (days < 2) priority *= 0.4;
             } else {
-                // Fair share: low WS / EE + under-trained vs tenure
                 priority += (90 - Math.min(wsEff, 90)) * 2;
                 if (eff != null) priority += Math.max(0, 50 - eff);
                 priority += Math.max(0, 5 - trainRatio * 100);
-                if (days < 3) priority *= 0.5;
+                if (days < settleDays + 2) priority *= 0.5;
             }
+
+            const tierInfo = trainsToNextEffTier(e, companyType);
 
             return {
                 id, e, name: e.name || e.playername || String(id),
                 position: safeStr(e.position) || '—',
-                days, wsEff, eff, parts, logged, fairShare, priority,
+                days, wsEff, eff, parts, logged, loggedToday, fairShare, priority,
                 bestName: best ? best.name : null,
-                man, int, end
+                man, int, end,
+                excluded, settling, isDirector,
+                tierTrains: tierInfo && tierInfo.trains != null ? tierInfo.trains : null,
+                tierNext: tierInfo && tierInfo.next != null ? tierInfo.next : null,
+                planned: 0,
+                done: false,
+                isNext: false
             };
         });
 
-        scored.sort((a, b) => b.priority - a.priority);
-
-        const totalDays = scored.reduce((s, x) => s + x.days, 0) || 1;
+        const totalDays = scored.reduce((s, x) => s + (x.excluded || x.isDirector ? 0 : x.days), 0) || 1;
         const totalLogged = scored.reduce((s, x) => s + x.logged, 0);
         scored.forEach(x => {
             const expectedShare = totalLogged * (x.days / totalDays);
             x.owedDelta = expectedShare - x.logged;
         });
 
-        // In fair mode, secondary sort by owedDelta when priorities are close
+        // Eligible pool for today's budget allocation
+        const pool = scored.filter(x => !x.excluded && !x.isDirector && !x.settling);
         if (mode === 'fair') {
-            scored.sort((a, b) => {
+            pool.sort((a, b) => {
                 if (Math.abs(b.priority - a.priority) > 8) return b.priority - a.priority;
                 return b.owedDelta - a.owedDelta;
             });
+        } else {
+            pool.sort((a, b) => b.priority - a.priority);
         }
 
-        return { trainEst, scored, totalLogged, totalDays, mode: mode };
+        // Allocate remaining daily budget (estimate − already logged today across all)
+        const loggedTodayAll = scored.reduce((s, x) => s + x.loggedToday, 0);
+        let budget = Math.max(0, (trainEst.daily || 0) - loggedTodayAll);
+        const plannedMap = {};
+        pool.forEach(x => { plannedMap[x.id] = 0; });
+        // Greedy: assign one train at a time to highest priority considering already planned today
+        for (let i = 0; i < budget; i++) {
+            pool.sort((a, b) => {
+                const ap = a.priority - (plannedMap[a.id] || 0) * (mode === 'fair' ? 12 : 6);
+                const bp = b.priority - (plannedMap[b.id] || 0) * (mode === 'fair' ? 12 : 6);
+                if (mode === 'fair') {
+                    const aDebt = (a.owedDelta || 0) - (plannedMap[a.id] || 0);
+                    const bDebt = (b.owedDelta || 0) - (plannedMap[b.id] || 0);
+                    if (Math.abs(bDebt - aDebt) > 0.25) return bDebt - aDebt;
+                }
+                return bp - ap;
+            });
+            if (!pool.length) break;
+            plannedMap[pool[0].id] = (plannedMap[pool[0].id] || 0) + 1;
+        }
+
+        scored.forEach(x => {
+            x.planned = plannedMap[x.id] || 0;
+            x.done = x.planned > 0 && x.loggedToday >= x.planned;
+            x.remaining = Math.max(0, x.planned - x.loggedToday);
+        });
+
+        // Sort display: next to train first, then remaining plan, then priority
+        scored.sort((a, b) => {
+            if (a.excluded !== b.excluded) return a.excluded ? 1 : -1;
+            if (a.settling !== b.settling) return a.settling ? 1 : -1;
+            if (b.remaining !== a.remaining) return b.remaining - a.remaining;
+            return b.priority - a.priority;
+        });
+        let markedNext = false;
+        scored.forEach(x => {
+            if (!markedNext && x.remaining > 0) {
+                x.isNext = true;
+                markedNext = true;
+            }
+        });
+
+        return {
+            trainEst, scored, totalLogged, totalDays, mode,
+            settleDays, budgetLeft: budget, loggedTodayAll
+        };
     }
 
     function analyzeStock(stock) {
@@ -4901,13 +5715,275 @@
         return html;
     }
 
+
+    /** Primary = higher req stat on the role; secondary = the other non-zero. */
+    function positionPrimarySecondary(pos) {
+        if (!pos) return { primary: null, secondary: null };
+        const pairs = [
+            { key: 'man', req: Number(pos.man) || 0 },
+            { key: 'int', req: Number(pos.int) || 0 },
+            { key: 'end', req: Number(pos.end) || 0 }
+        ].filter(x => x.req > 0).sort((a, b) => b.req - a.req);
+        return {
+            primary: pairs[0] || null,
+            secondary: pairs[1] || null
+        };
+    }
+
+    /**
+     * Minimum director trains to reach target stats while trained in `pos`.
+     * Each train: +50 primary, +25 secondary (wiki); tertiary unchanged.
+     * trains = max(ceil(priGap/50), ceil(secGap/25)).
+     */
+    function calcMinDirectorTrains(current, target, pos) {
+        const cur = {
+            man: Math.max(0, Number(current.man) || 0),
+            int: Math.max(0, Number(current.int) || 0),
+            end: Math.max(0, Number(current.end) || 0)
+        };
+        const tgt = {
+            man: Math.max(0, Number(target.man) || 0),
+            int: Math.max(0, Number(target.int) || 0),
+            end: Math.max(0, Number(target.end) || 0)
+        };
+        const ps = positionPrimarySecondary(pos);
+        if (!ps.primary) {
+            return { ok: false, error: 'Position has no stat requirements', trains: null };
+        }
+        const priKey = ps.primary.key;
+        const secKey = ps.secondary ? ps.secondary.key : null;
+        const allKeys = ['man', 'int', 'end'];
+        const tertiaryKeys = allKeys.filter(k => k !== priKey && k !== secKey);
+
+        const priGap = Math.max(0, tgt[priKey] - cur[priKey]);
+        const secGap = secKey ? Math.max(0, tgt[secKey] - cur[secKey]) : 0;
+        const priTrains = priGap > 0 ? Math.ceil(priGap / TRAIN_PRIMARY) : 0;
+        const secTrains = secGap > 0 ? Math.ceil(secGap / TRAIN_SECONDARY) : 0;
+        const trains = Math.max(priTrains, secTrains);
+
+        const after = {
+            man: cur.man,
+            int: cur.int,
+            end: cur.end
+        };
+        after[priKey] = cur[priKey] + trains * TRAIN_PRIMARY;
+        if (secKey) after[secKey] = cur[secKey] + trains * TRAIN_SECONDARY;
+
+        const unreachable = [];
+        tertiaryKeys.forEach(k => {
+            if (tgt[k] > cur[k]) {
+                unreachable.push({
+                    key: k,
+                    need: tgt[k] - cur[k],
+                    note: 'Not trained in this position (no ' + k.toUpperCase() + ' gain per train)'
+                });
+            }
+        });
+
+        return {
+            ok: true,
+            trains,
+            priKey,
+            secKey,
+            priGap,
+            secGap,
+            priTrains,
+            secTrains,
+            after,
+            unreachable,
+            posName: pos.name || ''
+        };
+    }
+
+
+    /**
+     * Rank positions for reaching target stats from current via director trains.
+     * Prefers roles that cover more of the needed stats, then fewer trains.
+     */
+    function rankTrainingRolesForTargets(current, target, companyType) {
+        const positions = getPositionsForType(companyType) || [];
+        const cur = {
+            man: Math.max(0, Number(current.man) || 0),
+            int: Math.max(0, Number(current.int) || 0),
+            end: Math.max(0, Number(current.end) || 0)
+        };
+        const tgt = {
+            man: Math.max(0, Number(target.man) || 0),
+            int: Math.max(0, Number(target.int) || 0),
+            end: Math.max(0, Number(target.end) || 0)
+        };
+        const needed = ['man', 'int', 'end'].filter(k => tgt[k] > cur[k]);
+        if (!needed.length || !positions.length) return { needed, ranked: [] };
+
+        const ranked = positions.map(pos => {
+            const r = calcMinDirectorTrains(cur, tgt, pos);
+            const ps = positionPrimarySecondary(pos);
+            const coverKeys = [];
+            if (ps.primary) coverKeys.push(ps.primary.key);
+            if (ps.secondary) coverKeys.push(ps.secondary.key);
+            const covered = needed.filter(k => coverKeys.includes(k));
+            const missed = needed.filter(k => !coverKeys.includes(k));
+            // Progress: how much of needed gaps this role can address (0–1)
+            let gapTotal = 0, gapCovered = 0;
+            needed.forEach(k => {
+                const g = tgt[k] - cur[k];
+                gapTotal += g;
+                if (coverKeys.includes(k)) gapCovered += g;
+            });
+            const coverage = gapTotal > 0 ? gapCovered / gapTotal : 1;
+            return {
+                pos,
+                name: pos.name,
+                trains: r.ok ? r.trains : 999999,
+                covered,
+                missed,
+                coverage,
+                after: r.ok ? r.after : null,
+                priKey: r.priKey,
+                secKey: r.secKey,
+                detail: r
+            };
+        }).filter(x => x.trains < 999999);
+
+        ranked.sort((a, b) =>
+            b.coverage - a.coverage ||
+            b.covered.length - a.covered.length ||
+            a.trains - b.trains ||
+            a.name.localeCompare(b.name)
+        );
+        return { needed, ranked };
+    }
+
+    /** Best single role, plus best role per missing stat when one role cannot cover all. */
+    function recommendTrainingPath(current, target, companyType, selectedPosName) {
+        const { needed, ranked } = rankTrainingRolesForTargets(current, target, companyType);
+        if (!needed.length) {
+            return { needed, best: null, alts: [], note: 'No stat increases needed.' };
+        }
+        if (!ranked.length) {
+            return { needed, best: null, alts: [], note: 'No positions available for this company type.' };
+        }
+        const best = ranked[0];
+        const selected = selectedPosName
+            ? ranked.find(r => r.name.toLowerCase() === String(selectedPosName).toLowerCase())
+            : null;
+
+        // Per-stat best when best still misses some needed stats
+        const alts = [];
+        if (best.missed.length) {
+            best.missed.forEach(stat => {
+                const forStat = ranked
+                    .filter(r => r.covered.includes(stat))
+                    .sort((a, b) => a.trains - b.trains || b.coverage - a.coverage)[0];
+                if (forStat) {
+                    alts.push({
+                        stat,
+                        role: forStat.name,
+                        trains: forStat.trains,
+                        covered: forStat.covered
+                    });
+                }
+            });
+        }
+
+        let switchRecommended = false;
+        if (selected) {
+            if (selected.missed.length && best.coverage > selected.coverage + 0.01) {
+                switchRecommended = true;
+            } else if (selected.missed.length && best.name !== selected.name && best.coverage >= selected.coverage) {
+                switchRecommended = true;
+            } else if (!selected.missed.length && best.name !== selected.name && best.trains < selected.trains) {
+                switchRecommended = true; // same coverage, fewer trains
+            }
+        } else if (best.missed.length || true) {
+            switchRecommended = true; // always surface best when custom/no selection match
+        }
+
+        return {
+            needed,
+            best,
+            selected,
+            alts,
+            switchRecommended,
+            ranked: ranked.slice(0, 5)
+        };
+    }
+
+    function renderTrainCalculatorHtml(p, employees, companyType) {
+        const positions = getPositionsForType(companyType) || [];
+        const empArr = getEmpList(employees || {});
+        const typeLabel = resolveCompanyTypeName(companyType, p) || safeStr(companyType) || 'Company';
+
+        let empOpts = '<option value="">— Custom / new hire —</option>';
+        empArr.forEach(e => {
+            if (/director/i.test(safeStr(e.position))) return;
+            const id = empId(e);
+            const st = empStats(e);
+            const name = (e.name || e.playername || ('#' + id)).replace(/</g, '');
+            const pos = safeStr(e.position).replace(/"/g, '&quot;');
+            empOpts += `<option value="${id}" data-man="${st.man}" data-int="${st.int}" data-end="${st.end}" data-pos="${pos}">${name} (${pos || '—'})</option>`;
+        });
+
+        let posOpts = '';
+        if (positions.length) {
+            positions.forEach(pos => {
+                const n = String(pos.name).replace(/"/g, '&quot;');
+                posOpts += `<option value="${n}" data-man="${pos.man || 0}" data-int="${pos.int || 0}" data-end="${pos.end || 0}">${n} (${pos.man || 0}/${pos.int || 0}/${pos.end || 0})</option>`;
+            });
+        } else {
+            posOpts = '<option value="">No positions for this company type</option>';
+        }
+
+        const inputStyle = 'width:72px;padding:3px 6px;border-radius:4px;border:1px solid #444;background:#1a1a1a;color:#eee;font-size:12px';
+        return `<div class="tcm-section" id="tcm-train-calc" style="margin-top:12px">
+            <h4>Train Calculator</h4>
+            <div class="tcm-peer-note" style="margin-bottom:8px">
+                Each <strong>director train</strong> grants <strong>+${TRAIN_PRIMARY} primary</strong> and
+                <strong>+${TRAIN_SECONDARY} secondary</strong> work stats for the selected position
+                (Torn wiki — independent of efficiency). Tertiary stat does not increase in that role.
+            </div>
+            <div class="tcm-row"><span class="tcm-label">Employee</span>
+                <span class="tcm-value"><select id="tcm-tc-emp" style="max-width:100%;font-size:12px">${empOpts}</select></span></div>
+            <div class="tcm-row"><span class="tcm-label">Train as role</span>
+                <span class="tcm-value"><select id="tcm-tc-pos" style="max-width:100%;font-size:12px">${posOpts}</select>
+                <span style="color:#888;font-size:11px"> · ${typeLabel}</span></span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0">
+                <div>
+                    <div style="font-size:11px;color:#9cf;margin-bottom:4px">Current stats</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                        <label style="font-size:11px">MAN <input type="number" id="tcm-tc-cman" min="0" step="1" value="0" style="${inputStyle}"></label>
+                        <label style="font-size:11px">INT <input type="number" id="tcm-tc-cint" min="0" step="1" value="0" style="${inputStyle}"></label>
+                        <label style="font-size:11px">END <input type="number" id="tcm-tc-cend" min="0" step="1" value="0" style="${inputStyle}"></label>
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:#9cf;margin-bottom:4px">Target stats</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                        <label style="font-size:11px">MAN <input type="number" id="tcm-tc-tman" min="0" step="1" value="0" style="${inputStyle}"></label>
+                        <label style="font-size:11px">INT <input type="number" id="tcm-tc-tint" min="0" step="1" value="0" style="${inputStyle}"></label>
+                        <label style="font-size:11px">END <input type="number" id="tcm-tc-tend" min="0" step="1" value="0" style="${inputStyle}"></label>
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0">
+                <button type="button" class="tcm-btn secondary" id="tcm-tc-use-req" title="Set targets to this role's recommended stats">Use role requirements as target</button>
+                <button type="button" class="tcm-btn" id="tcm-tc-calc">Calculate</button>
+            </div>
+            <div id="tcm-tc-result" class="tcm-peer-note" style="margin-top:8px">Enter current + target stats, pick a role, then Calculate.</div>
+        </div>`;
+    }
+
     function renderSmartTrainingHtml(p, employees, companyType) {
         const empMap = employees || {};
         const useList = getEmpList({ employees: empMap, company_employees: empMap });
         if (!useList.length) return '';
 
-        const { trainEst, scored, totalLogged, mode } = buildSmartTraining(p, empMap, companyType);
+        const built = buildSmartTraining(p, empMap, companyType);
+        const { trainEst, scored, totalLogged, mode, settleDays, budgetLeft, loggedTodayAll } = built;
         const modeLabel = mode === 'star' ? 'Star push' : 'Fair share';
+        const txNote = trainEst.hasTrainer
+            ? (' +' + (trainEst.trainerExtra || 0) + ' from ' + (trainEst.trainers || 1) + ' trainer EE')
+            : '';
 
         let html = `<div class="tcm-section"><h4>Smart Training</h4>`;
         html += `<div class="tcm-row"><span class="tcm-label">Mode</span>
@@ -4916,35 +5992,63 @@
                 <button type="button" class="tcm-btn${mode === 'star' ? '' : ' secondary'}" id="tcm-mode-star" style="padding:2px 8px;font-size:11px;margin-left:4px">Star push</button>
             </span></div>`;
         html += `<div class="tcm-row"><span class="tcm-label">Est. trains / day</span>
-            <span class="tcm-value">${trainEst.daily} <span style="color:#888;font-weight:normal">(★${trainEst.rating}${trainEst.hasTrainer ? ' + trainer' : ''})</span></span></div>`;
-        html += `<div class="tcm-row"><span class="tcm-label">Logged trains (total)</span>
+            <span class="tcm-value">${trainEst.daily} <span style="color:#888;font-weight:normal">(★${trainEst.rating}${txNote})</span></span></div>`;
+        html += `<div class="tcm-row"><span class="tcm-label">Today (company day)</span>
+            <span class="tcm-value">Logged ${loggedTodayAll} · plan left ~${budgetLeft} · day ${tornCompanyDayKey()}</span></div>`;
+        html += `<div class="tcm-row"><span class="tcm-label">Logged trains (all-time)</span>
             <span class="tcm-value">${totalLogged}</span></div>`;
+        html += `<div class="tcm-row"><span class="tcm-label">Settling-in days</span>
+            <span class="tcm-value">
+                <input type="number" id="tcm-settle-days" min="0" max="30" value="${settleDays}"
+                    style="width:52px;padding:2px 6px;border-radius:4px;border:1px solid #444;background:#1a1a1a;color:#eee;font-size:12px">
+                <button type="button" class="tcm-btn secondary" id="tcm-settle-save" style="padding:2px 8px;font-size:11px;margin-left:4px">Save</button>
+                <span style="color:#888;font-size:11px"> — skip staff newer than this</span>
+            </span></div>`;
         html += `<div class="tcm-peer-note" style="margin:6px 0">
-            <strong>${modeLabel}</strong>:
+            <strong>${modeLabel}</strong> builds today's <strong>plan</strong> from remaining train budget.
             ${mode === 'star'
-                ? 'Prioritises staff closest under the next EE tier (100 / 110) to push company stars faster.'
-                : 'Prioritises low WS efficiency / effectiveness and tenure fairness (Fair Δ).'}
-            Click <strong>+Train</strong> after you train them in Torn. Does not spend trains in-game.
+                ? 'Prioritises staff near the next EE tier and trains-to-tier.'
+                : 'Prioritises tenure fairness (Fair Δ) and under-trained staff.'}
+            Staff in settling-in or <strong>excluded</strong> are skipped.
+            Click <strong>+Train</strong> after you train them in Torn (does not spend trains in-game).
+            Trainer capacity uses EE bands (50/100→+1, 150→+2, 200→+3 per trainer).
         </div>`;
 
         html += `<table class="tcm-emp"><thead><tr>
-            <th>Name</th><th>Pos</th><th>Days</th><th>WS Eff</th><th>Eff%</th><th>Logged</th><th>Fair Δ</th><th></th>
+            <th></th><th>Name</th><th>Pos</th><th>Days</th><th>WS</th><th>EE</th>
+            <th title="Planned today / logged today">Plan</th>
+            <th title="Simulated director trains to next EE tier on current role">→Tier</th>
+            <th>Fair Δ</th><th></th><th title="Exclude from train plan">Excl</th>
         </tr></thead><tbody>`;
 
-        scored.slice(0, 25).forEach(x => {
+        scored.slice(0, 30).forEach(x => {
             const wsCls = x.wsEff >= 90 ? 'tcm-good' : x.wsEff >= 70 ? 'tcm-warn' : 'tcm-bad';
             const fairCls = x.owedDelta > 0.5 ? 'tcm-gap' : x.owedDelta < -0.5 ? 'tcm-ok' : '';
-            const fairStr = (x.owedDelta >= 0 ? '+' : '') + x.owedDelta.toFixed(1);
+            const fairStr = (x.owedDelta >= 0 ? '+' : '') + (x.owedDelta || 0).toFixed(1);
             const effStr = x.eff != null ? Math.round(x.eff) : '—';
-            html += `<tr>
+            const planStr = x.planned
+                ? (x.loggedToday + '/' + x.planned + (x.done ? ' ✓' : ''))
+                : (x.loggedToday ? String(x.loggedToday) : '—');
+            const planCls = x.done ? 'tcm-good' : (x.remaining > 0 ? 'tcm-warn' : '');
+            const tierStr = x.tierTrains != null && x.tierNext
+                ? (x.tierTrains + '→' + x.tierNext)
+                : '—';
+            const rowStyle = x.isNext ? 'background:rgba(74,222,128,0.12);' : (x.excluded || x.settling ? 'opacity:0.55;' : '');
+            const flag = x.isNext ? '<span class="tcm-good" title="Train next">▶</span>'
+                : (x.settling ? '<span title="Settling-in">…</span>'
+                : (x.excluded ? '<span title="Excluded">✕</span>' : ''));
+            html += `<tr style="${rowStyle}">
+                <td>${flag}</td>
                 <td>${x.name}</td>
                 <td>${x.position}</td>
                 <td>${x.days}</td>
                 <td class="${wsCls}">${x.wsEff || '—'}</td>
                 <td>${effStr}</td>
-                <td>${x.logged}</td>
+                <td class="${planCls}">${planStr}</td>
+                <td title="${x.tierNext ? ('Next EE ' + x.tierNext) : ''}">${tierStr}</td>
                 <td class="${fairCls}">${fairStr}</td>
                 <td><button class="tcm-btn" data-train-id="${x.id}" style="padding:2px 6px;font-size:11px">+Train</button></td>
+                <td><input type="checkbox" class="tcm-train-excl" data-excl-id="${x.id}" ${x.excluded ? 'checked' : ''} title="Exclude from plan"></td>
             </tr>`;
         });
         html += `</tbody></table>
@@ -4952,10 +6056,12 @@
                 <button class="tcm-btn secondary" id="tcm-reset-trains">Reset train log</button>
             </div>
             <div class="tcm-peer-note">
-                Fair Δ = expected share of logged trains by tenure minus actual. Positive = relatively under-trained.
-                Top of list = train first (${modeLabel}).
+                <strong>Plan</strong> = logged today / planned today for this company day (rolls ~18:00 TCT).
+                <strong>→Tier</strong> = simulated trains on <em>current</em> role to next EE band (50/100/150/200).
+                Fair Δ = expected share of all-time logged trains by tenure − actual.
             </div>
         </div>`;
+        html += renderTrainCalculatorHtml(p, empMap, companyType);
         return html;
     }
 
@@ -4964,6 +6070,10 @@
         const recos = [];
         const empArr = getEmpList(employees);
         if (!empArr.length) return recos;
+        // Prefer resolved type name (handles numeric ids / employee job type)
+        companyType = resolveCompanyTypeName(companyType, p) ||
+            resolveCompanyTypeName(p && (p.company_type || p.type), p) ||
+            companyType;
 
         const roleCount = {};
         empArr.forEach(e => {
@@ -5045,6 +6155,12 @@
         }
 
         // Company-wide role plan (fit score + anti-stacking), not raw max WS
+        const positions = getPositionsForType(companyType);
+        if (!positions || !positions.length) {
+            const label = safeStr(companyType) || 'this company type';
+            recos.push('No position requirements table matched for "' + label +
+                '" — role-move suggestions are unavailable. Supported types: all standard Torn companies.');
+        }
         const plan = suggestCompanyAssignments(empArr, companyType);
         const moves = plan
             .filter(x => x.suggested && x.current &&
@@ -5316,7 +6432,7 @@
             });
             html += `<div class="tcm-peer-note">Warn ≥${INACTIVE_WARN_DAYS}d · replace threshold ≥${INACTIVE_REPLACE_DAYS}d (last_action from API)</div></div>`;
         }
-        const eeHints = eePromotionHints(employees);
+        const eeHints = eePromotionHints(employees, resolveCompanyTypeName((companyData&&(companyData.company||companyData.profile)||{}).company_type, companyData&&(companyData.company||companyData.profile)) || "");
         if (eeHints.length) {
             html += `<div class="tcm-section"><h4>EE promotion path</h4>`;
             eeHints.forEach(h => {
@@ -5448,6 +6564,27 @@
                 if (companyData) render(companyData);
             };
         }
+        const settleSave = document.getElementById('tcm-settle-save');
+        if (settleSave) {
+            settleSave.onclick = () => {
+                const el = document.getElementById('tcm-settle-days');
+                const v = saveSettlingDays(el ? el.value : 3);
+                setStatus('Settling-in days set to ' + v);
+                if (companyData) render(companyData);
+            };
+        }
+        content.querySelectorAll('.tcm-train-excl').forEach(cb => {
+            cb.onchange = () => {
+                const id = cb.getAttribute('data-excl-id');
+                const map = loadTrainExclude();
+                if (cb.checked) map[String(id)] = true;
+                else delete map[String(id)];
+                saveTrainExclude(map);
+                if (companyData) render(companyData);
+            };
+        });
+
+        wireTrainCalculator();
 
         wirePeerButtons();
 
