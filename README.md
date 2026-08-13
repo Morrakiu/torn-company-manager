@@ -1,174 +1,178 @@
-# Torn Company Manager
+# Morrakiu's Company Manager
 
-Tampermonkey / TornPDA userscript for **company directors** on [Torn.com](https://www.torn.com).
+Tampermonkey / Torn PDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.11.2  
-**Install:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — **full v3.11.2** userscript on `main` (raw install via Tampermonkey)
+**Version:** 3.24.1  
+**Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — Tampermonkey auto-updates from GitHub branch **`Morrakiu-TCM-Beta`** — **full v3.24.1** userscript (raw install via Tampermonkey / PDA)
 
 ---
 
 ## Features
 
 ### Company overview
-- Stars, type, headcount, daily/weekly income, bank
-- Popularity, efficiency, work environment, advertising budget (when API provides them)
-- **Weekly Metrics** table — efficiency, environment, avg employee effectiveness, popularity vs last ISO week
-- **Finance strip** — daily payroll, profit after wages, margin %, today vs average day (strong / average / weak)
-- **Stock smart balance** — days left, critical/watch badges, suggested order qty for ~7 days (when sales data exists)
-- Director vs employee detection
+- Stars, type, headcount, daily/weekly income
+- Popularity, efficiency, work environment, advertising budget (when the API provides them)
+- **Metrics** tab — weekly history (up to 4 ISO weeks) vs previous week
+- **Finance** — daily payroll, profit after wages, margin %, today vs average day, **salary-ratio warning** (≥60% payroll/income)
+- **Stock** — days left, critical/watch, suggested order qty (~7 days when sales data exists)
+- Director vs employee detection; **Director / Employee view** toggle
 
 ### Tabs
 
 | Tab | Contents |
 |-----|----------|
-| **Training** | Smart Training queue with **Fair share** / **Star push** modes, train log |
-| **Employees** | Metric-aware recommendations, best-position advisor, EE breakdown (settled / addiction / inactivity / merits / wage) |
-| **Peers** | Compare your role mix to **10★** companies of the same type |
+| **Training** | Smart Training queue (**Fair share** / **Star push**), train log |
+| **Employees** | Recommendations, best-position advisor (greedy company-wide assignment), role-fit dropdowns, inactive alerts, **EE promotion path** |
+| **Peers** | API-only peer list + role mix; benchmark filters; opt-in role share |
+| **Metrics** | Week-over-week company metrics |
 | **Discord** | Permanent log + daily panel + weekly panel webhooks · 18:00 TCT auto-post |
 
 ### Smart Training
 - Estimates trains/day from star rating (+ trainer if staffed)
-- **Fair share** mode — prioritises low WS efficiency / effectiveness and tenure fairness
-- **Star push** mode — prioritises staff closest under the next EE tier (100 / 110) to push stars
+- **Fair share** — low WS efficiency / effectiveness and tenure fairness
+- **Star push** — staff closest under the next EE tier
 - **+Train** logs a train after you use it in-game (does not spend trains)
-- **Fair Δ** = expected share of logged trains by days employed − actual
 
-### Best position advisor & recommendations
-- Built-in position requirements for common company types
-- Efficiency formula aligned with Torn working-stat rules
-- Flags staff who should move roles
-- Employee table shows **settled-in, addiction, inactivity, merits, wage** when the API provides them
-- Recommendations also use **week-over-week metric deltas** (efficiency / environment / effectiveness / popularity) and live low-effectiveness staff
+### Best position advisor
+- Position requirements for common company types
+- **Role-fit scoring** + greedy assignment (anti-stacking; priority roles first)
+- Per-employee effectiveness vs every role; explicit **→ Role** move suggestions
+- Inactive employees: warn ≥3d, replace threshold ≥7d (`last_action` from API)
+- EE promotion hints toward tiers 50 / 100 / 150 / 200
 
-### Weekly metrics history
-- Snapshots company efficiency, work environment, avg (and per-role) employee effectiveness, popularity, role mix, staffing flags
-- **JSONBin keeps the last 4 ISO weeks** (older weeks pruned)
-- Compared to the previous week on the dashboard and in the **weekly Discord panel**
+### Peers / Benchmark (API only — no page scraping)
+Compliant with Torn scripting rules: **Torn API only** for peer data.
 
-### 10★ peer role-mix
-- Caches company IDs while you browse the **Job List**
-- Scrapes **public corp-info pages** for employee position text (other companies’ employee stats are not public via API)
-- **Refresh Peers** builds average staffing by role vs yours
+1. **`company/{typeId}/companies`** — list companies of your type (rating, income, capacity)
+2. **Filter** — 10★ only · same ★ (higher $) · above ★ · top (8★+ higher $); optional **same size**
+3. **`company/{id}?selections=employees`** — public employee **positions** for role-mix averages
+4. **Income rank** among listed companies of your type
+5. Weekly list refresh gated around **Sunday 18:00 TCT**; shared via JSONBin when Data Sync is on
+6. **Opt-in role share** — directors may publish anonymized role counts to Data Sync for denser averages
+
+YATA is used only as a fallback ID list if Torn’s companies list fails.
 
 ### Discord reports
-- Dedicated **Discord** tab with **three optional webhooks**:
-  - **Permanent log** — appends a new message each daily run (history channel)
-  - **Daily data panel** — edits the same message daily
-  - **Weekly panel** — Sundays **18:00 TCT**; week-over-week metrics + company changes that can affect those stats (roles, Manager/Trainer/Marketer, headcount, ad budget, rating, etc.)
-  - **4-week trend panel** — separate persistent message on the **daily data panel** webhook; updated only on the **first Sunday of each month**, and also appended to the **permanent log** when set (dashboard always shows the 4-week trend)
-- Optional daily auto-post at **18:00 TCT** while the companies page is open
-- **Multi-device dedupe** for daily log, weekly panel, and monthly 4-week panel via JSONBin claims
-- Daily report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down
-- Webhook URLs, options, and panel message ids sync through **JSONBin**
+- **Permanent log** — append each daily run  
+- **Daily data panel** — edit the same message daily  
+- **Weekly panel** — Sundays 18:00 TCT (week-over-week + staffing/company changes)  
+- **4-week trend** — updated on the **first Sunday of the month** (panel + optional permanent log)  
+- Multi-device dedupe via JSONBin claims  
+- Report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down  
 
-### Data Sync (Web ↔ PDA)
-JSONBin is the shared store for **trains**, **weekly metrics**, **Discord settings**, and the **daily log claim**.
-
+### Data Sync (Web ↔ PDA) + Google Sheets
 | Channel | Purpose |
 |---------|---------|
-| **JSONBin.io** | Two-way store: trains + metrics + Discord settings/meta |
-| **Discord webhooks** | Optional permanent log + live data panel |
+| **JSONBin.io** | Two-way: trains, metrics, Discord settings/meta, peer lists, role shares |
+| **Google Sheets** | Optional **one-way export** via Apps Script web app (Finance, Trains, Metrics, Peers, Stock, TornStats import) |
+| **Discord webhooks** | Optional reporting |
 
-See [Data Sync setup](#data-sync-setup-web--pda) below.
+Configure both under **Data Sync** in the panel. Use either or both.
+
+### TornStats helper
+- Script also runs on **tornstats.com** while **you** view a page
+- Detects company finance tables, stages rows, copy/stage badge
+- **Import TornStats stage** in Data Sync merges into local finance history (last ~120 days)
+
+Compliant: no background loads of pages you are not viewing.
 
 ---
 
 ## Install
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) (or use TornPDA script support).
-2. Open the **raw** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) from this repository and choose **Install** in Tampermonkey.  
-   The full **v3.11.2** userscript is on the `main` branch of this repo.
+1. Install [Tampermonkey](https://www.tampermonkey.net/) **or** Torn PDA custom scripts.
+2. Open the **raw** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) from this repository → **Install**.  
+   The full **v3.24.1** userscript is on the **`Morrakiu-TCM-Beta`** branch (development / default publish branch).
 3. Visit [companies.php](https://www.torn.com/companies.php).
-4. Enter a Torn API key (or use **Create Custom Key**).
+4. Enter a Torn API key (or **Create Custom Key**). On Torn PDA, the key can auto-fill via `###PDA-APIKEY###` when the app injects it.
 
-### Pages the script runs on
-- `companies.php` / `page.php?sid=companies*` — dashboard
-- `joblist.php` — caches peer company IDs; scrapes positions on corp-info views
+**Raw install / auto-update URL:**  
+https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
+
+### Pages
+- `companies.php` / `page.php?sid=companies*` — dashboard  
+- `joblist.php` — matched for convenience (no scraping)  
+- `tornstats.com` — finance helper only  
+
+### Torn PDA
+- Enable custom user scripts; injection time **End**
+- Prefer **GMforPDA 2.3+** (HTTP **PUT** / **PATCH** for JSONBin writes and Discord panel edits)
+- Web and PDA do **not** share local storage — use **JSONBin** to align devices
 
 ---
 
 ## API key
 
-**Recommended:** Limited custom key with:
+**Recommended custom key:**
 
-- **User:** `profile`, `job`, `basic`
-- **Company:** `profile`, `employees`, `stock`, `detailed`
+- **User:** `profile`, `job`, `basic`  
+- **Company:** `profile`, `employees`, `stock`, `detailed`  
 
-Use **Create Custom Key** in the panel to open Torn’s key form pre-filled with these selections.
+Use **Create Custom Key** in the panel for a pre-filled Torn form.
 
-- Full employee stats and stock need a **Director** key on the company account.
-- Key is stored only in the browser (`GM_setValue`).
-
-Native **API v2** is preferred, with safe fallbacks.
+- Full employee stats and stock need a **Director** key.  
+- Key is stored only via `GM_setValue` (browser / PDA storage).  
+- Native **API v2** preferred, with safe fallbacks.
 
 ---
 
-## Data Sync setup (Web ↔ PDA)
+## Data Sync setup
 
-### Why not Discord alone?
-A Discord webhook can **post** (and edit) messages. It cannot be **read** by the script for shared state. PDA and browser share trains, weekly metrics, Discord settings, and the daily log claim through JSONBin.
+### JSONBin (two-way Web ↔ PDA)
 
-### JSONBin (required for two-way Data Sync)
-
-JSONBin rejects a blank body (`Bin cannot be blank`). Use a real starter object.
-
-1. Create a free account at [jsonbin.io](https://jsonbin.io).
-2. **Create Bin** and paste this JSON (do not leave the editor empty):
+JSONBin rejects a blank body. Create a bin with:
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "updated": 0,
   "company_id": null,
+  "company_name": null,
   "trains": {},
   "metrics": { "weeks": {} },
+  "peers": {},
+  "roleShares": {},
   "discord": {
     "logWebhook": "",
     "panelWebhook": "",
     "weeklyWebhook": "",
-    "opts": {
-      "unusedTrains": false,
-      "dailyMetrics": false,
-      "employeeAlerts": false,
-      "starChange": false,
-      "autoPost": true,
-      "weeklyPanel": true
-    },
+    "opts": {},
     "meta": {}
   }
 }
 ```
 
-3. Copy the **Bin ID** from the URL / response.
-4. Create a **Master Key** (Access Keys) with read + write on that bin.
-5. In the script **Data Sync** / Discord area, paste Bin ID and Master Key. Save.
-6. Use the **same** Bin ID + Master Key on every device (browser + PDA).
+1. [jsonbin.io](https://jsonbin.io) → create bin → copy **Bin ID** + **Master Key**  
+2. Panel → **Data Sync** → paste → **Save settings** → **JSONBin Sync Now**  
+3. Same Bin ID + key on every device (web + PDA)
 
-The script merges train logs, keeps the last **4** metric weeks, and stores Discord webhook URLs, options, and panel message IDs so multi-device runs stay in sync.
+### Google Sheets (optional export)
 
-### Discord webhooks (optional)
+1. New Google Sheet → **Extensions → Apps Script**  
+2. Data Sync → **Copy Apps Script** → paste `doPost` → **Deploy → Web app**  
+   - Execute as: **Me** · Who has access: **Anyone** (or anyone with the link)  
+3. Paste the `/exec` URL → Save → **Export to Sheets**
 
-1. In Discord: channel settings → Integrations → Webhooks → New Webhook.
-2. Paste URLs into the script’s **Discord** tab:
-   - **Permanent log** — history channel (new message each day)
-   - **Daily data panel** — single editable message + monthly 4-week trend message
-   - **Weekly panel** — Sundays 18:00 TCT week-over-week panel
-3. Enable report types and **Auto-post at 18:00 TCT** if desired.
-4. Settings sync through JSONBin when Data Sync is configured.
+### TornStats import
+
+1. Open company finance on tornstats.com with the script installed  
+2. Use the TCM badge (Copy / Stage)  
+3. On Torn → **Data Sync → Import TornStats stage**
 
 ---
 
-## Privacy
+## Privacy / compliance
 
 | Item | Behaviour |
 |------|-----------|
-| Torn API key | Local browser storage only |
-| Train log | Local + optional JSONBin + optional Discord post |
-| Peer scrapes | Public Torn pages you open |
-| Data sharing | None, unless you configure JSONBin/Discord |
+| Torn API key | Local storage only |
+| Train / metrics / peers | Local + optional JSONBin |
+| Peer data | **Torn API only** (no joblist/corpinfo scraping) |
+| TornStats | Only the page you are actively viewing |
+| Sheets / Discord | Only if you configure them |
 
-Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rules. Do not share API keys.
+Comply with [Torn’s API terms](https://www.torn.com/api.html) and [scripting rules](https://www.torn.com/rules.php). Do not share API keys.
 
 ---
 
@@ -176,7 +180,7 @@ Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rule
 
 | File | Description |
 |------|-------------|
-| `Torn_Company_Manager.user.js` | **Full** v3.11.2 userscript on `main` (install from raw file) |
+| `Torn_Company_Manager.user.js` | **Full** v3.24.1 userscript on `Morrakiu-TCM-Beta` |
 | `README.md` | This document |
 | `INSTALL.md` | Short install notes |
 
@@ -184,50 +188,38 @@ Comply with [Torn’s API ToS](https://www.torn.com/api.html) and scripting rule
 
 ## Changelog
 
-### 3.11.2
-- Streamlined internals: parallel company API selections, concurrent peer loads (pool of 4)
-- Shared helpers (`companyRoster`, `empStats`, `mapPool`, leaner `loadJson`) — same features
+### 3.24.x
+- Smart Training: daily plan, settling-in, exclude, trainer EE capacity, trains→tier simulation
+- Train Calculator + best-role recommendation for targets
+- Script renamed **Morrakiu's Company Manager**; auto-update from `Morrakiu-TCM-Beta`
 
-### 3.11.1
-- Mobile / PDA layout: panel fits narrow viewports, safe-area insets, scrollable body
-- Wide tables scroll horizontally inside the panel; drag disabled under 640px width
+### 3.22.0
+- Universal position tables for **all 39** Torn company types
 
-### 3.11.0
-- Stock smart balance: days left, critical/watch, order qty for ~7 days
-- Finance strip: payroll, profit after wages, day quality (strong/avg/weak)
-- Employee EE breakdown: settled / addiction / inactivity / merits / wage
-- Train modes: **Fair share** vs **Star push**
-- Daily Discord metrics include payroll, day quality, critical stock
+### 3.21.1
+- **Torn PDA hardening:** prefer `PDA_httpGet/Post/Put/Patch` when available; clearer JSONBin PUT errors  
+- `###PDA-APIKEY###` support; broader `@match`; PDA notes in Data Sync / key help  
 
-### 3.10.3
-- 4-week panel moved to the **daily data panel** webhook (own edit-in-place message)
-- Updates only on the **first Sunday of each month**; also posts to **permanent log** when configured
-- Manual **Post / Update 4-Week Now** + reset control
+### 3.21.0
+- **Google Sheets** optional export (Apps Script web app) alongside JSONBin  
+- **TornStats** finance helper (viewing tornstats.com only) + import into finance history  
+- Data Sync panel unified for JSONBin + Sheets + TornStats  
 
-### 3.10.2
-- 4-week trend chart on the dashboard
-- (Superseded) chart was briefly attached to the weekly panel
+### 3.20.0
+- Peer **benchmark filters** (10★ / same / above / top + same size)  
+- Income rank; position aliases; salary-ratio warn; EE promotion path  
 
-### 3.10.1
-- Metrics history expanded to **4 ISO weeks** in JSONBin (was 2)
+### 3.19.x
+- API peer roles via `employees` selection; **opt-in role-share** pool via JSONBin  
+- Inactive employee alerts; scraping removed for compliance  
 
-### 3.10.0
-- Third Discord webhook: **weekly panel** (Sundays 18:00 TCT) with week-over-week metrics + staffing/company changes
-- JSONBin metrics pruned for size; snapshot includes role counts, Manager/Trainer/Marketer flags, headcount, ad budget
+### 3.11.x – 3.18.x
+- Mobile layout; finance/stock/EE/train modes; Metrics tab; Director/Employee view  
+- Discord permanent / daily / weekly / 4-week panels; multi-device claims  
+- Greedy role recommendations; weekly metrics history  
 
-### 3.9.0
-- Weekly metrics log: company efficiency, work environment, avg employee effectiveness (+ popularity)
-- Week-over-week comparison table on the dashboard
-- Position / staffing recommendations react to metric deltas and low live effectiveness
-- Metrics synced via Data Sync (JSONBin `metrics.weeks`)
+---
 
-### 3.8.2
-- Multi-device permanent log dedupe via JSONBin claim (`lastLogPostDateTCT` + short-lived `logClaimId`)
-- Requires **Data Sync** so web and PDA share the daily log lock; panel updates remain edit-in-place
+## License / support
 
-### 3.8.1
-- Prune train log (local + JSONBin) for employees who left the company when roster is loaded/synced
-
-### 3.8.0
-- Dual Discord webhooks (permanent log + daily data panel)
-- Data Sync rename (JSONBin holds trains + Discord config, not trains only)
+Personal use. Comply with Torn rules. Issues and updates via this repository.
