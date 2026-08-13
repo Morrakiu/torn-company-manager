@@ -1401,18 +1401,104 @@
         const titleEl = header.querySelector('h3');
         let dragging = false, dragMoved = false, ox, oy;
         const isNarrow = () => window.matchMedia('(max-width: 640px)').matches;
+        const PAD = 8;
+        const MINI = 48;
 
+        function savePanelPos() {
+            try {
+                const r = panel.getBoundingClientRect();
+                GM_setValue('tcmPanelPos', JSON.stringify({
+                    left: Math.round(r.left),
+                    top: Math.round(r.top),
+                    collapsed: panel.classList.contains('collapsed')
+                }));
+            } catch (e) { /* ignore */ }
+        }
+
+        function clampPoint(left, top, width, height) {
+            const maxL = Math.max(PAD, window.innerWidth - width - PAD);
+            const maxT = Math.max(PAD, window.innerHeight - height - PAD);
+            return {
+                left: Math.min(maxL, Math.max(PAD, left)),
+                top: Math.min(maxT, Math.max(PAD, top))
+            };
+        }
+
+        /** Place panel with explicit left/top (clears right so layout is stable). */
+        function placePanel(left, top) {
+            panel.style.left = Math.round(left) + 'px';
+            panel.style.top = Math.round(top) + 'px';
+            panel.style.right = 'auto';
+        }
+
+        /**
+         * Minimize → 48px square at the top-right of the current panel.
+         * Expand → grow from that corner, pinned so the full panel stays on-screen
+         * (prefer right-edge anchor when the badge was on the right half).
+         */
         function setPanelCollapsed(on) {
-            const collapsed = !!on;
-            panel.classList.toggle('collapsed', collapsed);
+            const wantCollapsed = !!on;
+            const wasCollapsed = panel.classList.contains('collapsed');
+            if (wantCollapsed === wasCollapsed) {
+                // Still refresh label/button if needed
+            }
+
+            const before = panel.getBoundingClientRect();
+
+            if (wantCollapsed) {
+                // Anchor mini square to top-right corner of current panel
+                let left = before.right - MINI;
+                let top = before.top;
+                // If panel had no useful box yet, fall back to saved / default
+                if (!before.width || before.width < 10) {
+                    left = window.innerWidth - MINI - 12;
+                    top = 80;
+                }
+                const c = clampPoint(left, top, MINI, MINI);
+                panel.classList.add('collapsed');
+                placePanel(c.left, c.top);
+            } else {
+                panel.classList.remove('collapsed');
+                // Measure expanded size, then position without an off-screen flash:
+                // prefer keeping the right edge near where the badge was.
+                const afterW = panel.offsetWidth || Math.min(520, window.innerWidth - 16);
+                const afterH = panel.offsetHeight || Math.min(window.innerHeight * 0.85, window.innerHeight - 24);
+                const badgeRight = before.right || (window.innerWidth - 12);
+                const badgeTop = before.top || 80;
+                const nearRight = badgeRight >= window.innerWidth * 0.55;
+
+                let left, top;
+                if (nearRight) {
+                    left = window.innerWidth - afterW - 12;
+                    top = badgeTop;
+                } else {
+                    left = before.left;
+                    top = badgeTop;
+                }
+                const c = clampPoint(left, top, afterW, afterH);
+                placePanel(c.left, c.top);
+                // Second pass after layout settles (content height may change)
+                requestAnimationFrame(() => {
+                    if (!panel.classList.contains('collapsed')) {
+                        const r = panel.getBoundingClientRect();
+                        const c2 = clampPoint(r.left, r.top, r.width, r.height);
+                        if (Math.abs(c2.left - r.left) > 1 || Math.abs(c2.top - r.top) > 1) {
+                            placePanel(c2.left, c2.top);
+                        }
+                        savePanelPos();
+                    }
+                });
+            }
+
             if (titleEl) {
-                if (!titleEl.dataset.fullTitle) titleEl.dataset.fullTitle = titleEl.textContent || 'Company Manager';
-                titleEl.textContent = collapsed ? 'TCM' : (titleEl.dataset.fullTitle || 'Company Manager');
-                titleEl.title = collapsed ? 'Open Company Manager' : '';
+                if (!titleEl.dataset.fullTitle) titleEl.dataset.fullTitle = 'Company Manager';
+                titleEl.textContent = wantCollapsed ? 'TCM' : (titleEl.dataset.fullTitle || 'Company Manager');
+                titleEl.title = wantCollapsed ? 'Open Company Manager' : '';
             }
             const toggleBtn = panel.querySelector('#tcm-toggle');
-            if (toggleBtn) toggleBtn.textContent = collapsed ? '+' : '−';
-            try { GM_setValue('tcmPanelCollapsed', collapsed); } catch (e) { /* ignore */ }
+            if (toggleBtn) toggleBtn.textContent = wantCollapsed ? '+' : '−';
+            try { GM_setValue('tcmPanelCollapsed', wantCollapsed); } catch (e) { /* ignore */ }
+            savePanelPos();
         }
 
         header.addEventListener('mousedown', e => {
@@ -1428,20 +1514,17 @@
         document.addEventListener('mousemove', e => {
             if (!dragging) return;
             dragMoved = true;
-            const pad = 4;
+            const w = panel.offsetWidth;
+            const h = panel.offsetHeight;
             let nx = e.clientX - ox;
             let ny = e.clientY - oy;
-            const maxX = Math.max(pad, window.innerWidth - panel.offsetWidth - pad);
-            const maxY = Math.max(pad, window.innerHeight - 40 - pad);
-            if (nx < pad) nx = pad;
-            if (ny < pad) ny = pad;
-            if (nx > maxX) nx = maxX;
-            if (ny > maxY) ny = maxY;
-            panel.style.left = nx + 'px';
-            panel.style.top = ny + 'px';
-            panel.style.right = 'auto';
+            const c = clampPoint(nx, ny, w, h);
+            placePanel(c.left, c.top);
         });
-        document.addEventListener('mouseup', () => { dragging = false; });
+        document.addEventListener('mouseup', () => {
+            if (dragging && dragMoved) savePanelPos();
+            dragging = false;
+        });
 
         // Click minimized square (without dragging) → expand
         header.addEventListener('click', e => {
@@ -1451,31 +1534,21 @@
             setPanelCollapsed(false);
         });
 
-        // Keep panel on-screen after rotate / resize
+        // Keep panel on-screen after rotate / resize (no hard jump to defaults)
         window.addEventListener('resize', () => {
             if (!document.getElementById('tcm-panel')) return;
-            if (panel.classList.contains('collapsed')) {
-                // Keep floating square on-screen
-                const r = panel.getBoundingClientRect();
-                if (r.right > window.innerWidth - 4 || r.left < 4 || r.top < 4 || r.bottom > window.innerHeight - 4) {
-                    panel.style.left = '';
-                    panel.style.right = '12px';
-                    panel.style.top = '80px';
-                }
-                return;
-            }
-            if (isNarrow()) {
+            if (isNarrow() && !panel.classList.contains('collapsed')) {
                 panel.style.left = '';
                 panel.style.right = '';
                 panel.style.top = '';
                 panel.style.width = '';
-            } else {
-                const r = panel.getBoundingClientRect();
-                if (r.right > window.innerWidth - 4 || r.left < 4 || r.top < 4) {
-                    panel.style.left = '';
-                    panel.style.right = '12px';
-                    panel.style.top = '80px';
-                }
+                return;
+            }
+            const r = panel.getBoundingClientRect();
+            const c = clampPoint(r.left, r.top, r.width, r.height);
+            if (Math.abs(c.left - r.left) > 1 || Math.abs(c.top - r.top) > 1) {
+                placePanel(c.left, c.top);
+                savePanelPos();
             }
         });
 
@@ -1496,9 +1569,30 @@
         panel.querySelector('#tcm-close').onclick = () => panel.remove();
         updateViewModeButton();
 
-        // Restore last minimized state
-        if (GM_getValue('tcmPanelCollapsed', false) === true || GM_getValue('tcmPanelCollapsed', '0') === '1') {
-            setPanelCollapsed(true);
+        // Restore position + minimized state
+        try {
+            const saved = JSON.parse(GM_getValue('tcmPanelPos', 'null'));
+            if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+                const mini = saved.collapsed === true;
+                if (mini) panel.classList.add('collapsed');
+                const w = mini ? MINI : (panel.offsetWidth || 520);
+                const h = mini ? MINI : (panel.offsetHeight || 200);
+                const c = clampPoint(saved.left, saved.top, w, h);
+                placePanel(c.left, c.top);
+                if (mini) {
+                    if (titleEl) {
+                        titleEl.dataset.fullTitle = titleEl.dataset.fullTitle || 'Company Manager';
+                        titleEl.textContent = 'TCM';
+                        titleEl.title = 'Open Company Manager';
+                    }
+                    const toggleBtn = panel.querySelector('#tcm-toggle');
+                    if (toggleBtn) toggleBtn.textContent = '+';
+                }
+            } else if (GM_getValue('tcmPanelCollapsed', false) === true || GM_getValue('tcmPanelCollapsed', '0') === '1') {
+                setPanelCollapsed(true);
+            }
+        } catch (e) {
+            if (GM_getValue('tcmPanelCollapsed', false) === true) setPanelCollapsed(true);
         }
     }
 
