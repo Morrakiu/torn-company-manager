@@ -1,4 +1,4 @@
-// ==UserScript==
+ // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
 // @version      3.24.1
