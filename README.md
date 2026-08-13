@@ -3,8 +3,8 @@
 Tampermonkey / Torn PDA userscript for **company directors** on [Torn.com](https://www.torn.com).
 
 **Author:** Morrakiu  
-**Version:** 3.25.0  
-**Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — Tampermonkey auto-updates from GitHub branch **`Morrakiu-TCM-Beta`** — **full v3.25.0** userscript (raw install via Tampermonkey / PDA)
+**Version:** 3.25.2  
+**Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — Tampermonkey auto-updates from GitHub branch **`Morrakiu-TCM-Beta`** — **full v3.25.2** userscript (raw install via Tampermonkey / PDA)
 
 ---
 
@@ -22,31 +22,50 @@ Tampermonkey / Torn PDA userscript for **company directors** on [Torn.com](https
 
 | Tab | Contents |
 |-----|----------|
-| **Training** | Smart Training queue (**Fair share** / **Star push**), train log, **Train Calculator**, **Training Contracts**, daily plan with reservations, trainer EE bonus, settling-in / exclude |
+| **Training** | Smart Training queue (**Fair share** / **Star push**), train log |
 | **Employees** | Recommendations, best-position advisor (greedy company-wide assignment), role-fit dropdowns, inactive alerts, **EE promotion path** |
-| **Peers** | API-only peer list + role mix; benchmark filters; opt-in role share |
+| **Peers** | API-only peer list + role mix; benchmark filters |
 | **Metrics** | Week-over-week company metrics |
 | **Discord** | Permanent log + daily panel + weekly panel webhooks · 18:00 TCT auto-post |
 
-### Training
-- Smart Training: Fair share / Star push modes
-- **Train Calculator** — input current + target stats; trains needed; best-role recommendation if current role cannot train a wanted stat
-- **Training Contracts** — sales tracking, progress, daily reservation, JSONBin sync
-- Daily plan allocation with contract reservations
-- Trainer EE bonus table; director trains (+50 primary / +25 secondary)
-- Settling-in period and exclude list
-- Trains-to-next-efficiency-tier simulation (50 / 100 / 150 / 200)
+### Smart Training
+- Estimates trains/day from star rating (+ trainer if staffed)
+- **Fair share** — low WS efficiency / effectiveness and tenure fairness
+- **Star push** — staff closest under the next EE tier
+- **+Train** logs a train after you use it in-game (does not spend trains)
 
-### Positions & data
-- Full position tables for all 39 company types
-- Peer benchmarks via Torn API only (company/{type}/companies then company/{id}?selections=employees) — no page scrape
-- JSONBin sync (trains, contracts, metrics, peers, role-share)
-- Google Sheets Apps Script export
-- TornStats finance helper
-- PDA-compatible HTTP layer (GM / PDA_http*)
+### Best position advisor
+- Position requirements for common company types
+- **Role-fit scoring** + greedy assignment (anti-stacking; priority roles first)
+- **Peer role-mix targets** — when Peers data exists, assignment biases toward high-earning peer staffing ratios (scaled to your headcount); falls back to soft-cap spread otherwise
+- Per-employee effectiveness vs every role; explicit **→ Role** move suggestions
+- Inactive employees: warn ≥3d, replace threshold ≥7d (`last_action` from API)
+- EE promotion hints toward tiers 50 / 100 / 150 / 200
 
-### Company day
-- Boundary at **18:00 TCT**
+### Peers / Benchmark (API only — no page scraping)
+Compliant with Torn scripting rules: **Torn API only** for peer data.
+
+1. **`company/{typeId}/companies`** — list companies of your type (rating, income, capacity)
+2. **Filter** — 10★ only · same ★ (higher $) · above ★ · top (8★+ higher $); optional **same size**
+3. **`company/{id}?selections=employees`** — public employee **positions** for role-mix averages
+4. **Income rank** among listed companies of your type
+5. Weekly list refresh gated around **Sunday 18:00 TCT**; shared via JSONBin when Data Sync is on
+
+YATA is used only as a fallback ID list if Torn’s companies list fails.
+
+### Discord reports
+- **Permanent log** — append each daily run  
+- **Daily data panel** — edit the same message daily  
+- **Weekly panel** — Sundays 18:00 TCT (week-over-week + staffing/company changes)  
+- **4-week trend** — updated on the **first Sunday of the month** (panel + optional permanent log)  
+- Multi-device dedupe via JSONBin claims  
+- Report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down  
+
+### Data Sync (Web ↔ PDA) + Google Sheets
+| Channel | Purpose |
+|---------|---------|
+| **JSONBin.io** | Two-way: trains, metrics, Discord settings/meta, peer lists |
+| **Google Sheets** | Optional **one-way export** via Apps Script web app (Finance, Trains, Metrics, Peers, Stock, TornStats import) |
 
 ---
 
@@ -54,26 +73,64 @@ Tampermonkey / Torn PDA userscript for **company directors** on [Torn.com](https
 
 See [INSTALL.md](./INSTALL.md).
 
-**Raw install / update URL (branch `Morrakiu-TCM-Beta`):**  
+**Raw auto-update URL:**
 https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
+
+---
+
+## JSONBin starter
+
+JSONBin rejects a blank body. Create a bin with:
+
+```json
+{
+  "version": 5,
+  "updated": 0,
+  "company_id": null,
+  "company_name": null,
+  "trains": {},
+  "metrics": { "weeks": {} },
+  "peers": {},
+  "discord": {
+    "logWebhook": "",
+    "panelWebhook": "",
+    "weeklyWebhook": "",
+    "opts": {},
+    "meta": {}
+  }
+}
+```
+
+1. [jsonbin.io](https://jsonbin.io) → create bin → copy **Bin ID** + **Master Key**  
+2. Panel → **Data Sync** → paste → **Save settings** → **JSONBin Sync Now**  
+3. Same Bin ID + key on every device (web + PDA)
 
 ---
 
 ## Changelog (high level)
 
-### 3.25.0
-- Training Contracts (storage, UI, daily plan reservations, JSONBin merge)
+### 3.25.x
+- Training contracts (sales tracking, progress, daily reservation, JSONBin)
 - Train Calculator + best-role recommendation
-- Daily plan allocation with trainer bonus and tier simulation
-- Settling-in / exclude list
-- Docs and auto-update pointed at **Morrakiu-TCM-Beta**
+- Daily training plan with reservations / settling / exclude
+- Best Position Advisor uses **peer role-mix** targets (API only)
+- Opt-in role-share pool **removed** (v3.25.2)
 
-### Earlier
-- PDA HTTP layer; JSONBin + Sheets; TornStats helper
-- API peers/benchmarks; full 39-type positions
+### 3.20.0
+- Peer **benchmark filters** (10★ / same / above / top + same size)  
+- Income rank; position aliases; salary-ratio warn; EE promotion path  
+
+### 3.19.x
+- API peer roles via `employees` selection  
+- Inactive employee alerts; scraping removed for compliance  
+
+### 3.11.x – 3.18.x
+- Mobile layout; finance/stock/EE/train modes; Metrics tab; Director/Employee view  
+- Discord permanent / daily / weekly / 4-week panels; multi-device claims  
+- Greedy role recommendations; weekly metrics history  
 
 ---
 
-## License / notes
+## License / support
 
-For Torn directors. Use your own API key. No scraping of peer pages — Torn API only for peer data.
+Personal use. Comply with Torn rules. Issues and updates via this repository.
