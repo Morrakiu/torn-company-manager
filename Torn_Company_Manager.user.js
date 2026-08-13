@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.25.5
-// @description  Training contracts, plan, calculator. Peer role-mix advisor (API only). Full positions, PDA, JSONBin, Sheets, TornStats.
+// @version      3.26.0
+// @description  Stock tab + Discord stock-day alerts. Training contracts, plan, calculator. Peer role-mix advisor. PDA, JSONBin, Sheets.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=companies*
@@ -234,6 +234,8 @@
         dailyMetrics: false,
         employeeAlerts: false,
         starChange: false,
+        stockAlert: false,
+        stockAlertDays: 3, // alert when estimated days left ≤ this
         autoPost: true,
         weeklyPanel: true
     };
@@ -4526,7 +4528,14 @@
 
     function anyDiscordReportEnabled() {
         return !!(discordOpts.unusedTrains || discordOpts.dailyMetrics ||
-            discordOpts.employeeAlerts || discordOpts.starChange);
+            discordOpts.employeeAlerts || discordOpts.starChange ||
+            discordOpts.stockAlert);
+    }
+
+    function stockAlertDaysThreshold() {
+        const n = Number(discordOpts && discordOpts.stockAlertDays);
+        if (!isFinite(n) || n <= 0) return 3;
+        return Math.min(30, Math.max(0.5, n));
     }
 
     function initDiscordState() {
@@ -4663,20 +4672,16 @@
         add('Rating', p.rating != null ? '★' + p.rating : null, true);
         add('Employees', (p.employees_hired != null ? p.employees_hired : '?') + ' / ' + (p.employees_capacity != null ? p.employees_capacity : '?'), true);
 
-        const stockRows = analyzeStock(stock);
-        if (stockRows.length) {
-            const lines = stockRows.slice(0, 15).map(r => {
-                const d = r.days != null ? (' ~' + r.days.toFixed(1) + 'd') : '';
-                const flag = r.health === 'critical' ? ' ⚠' : (r.health === 'watch' ? ' ·' : '');
-                return r.name + ': **' + (r.inStock != null ? r.inStock : '?') + '**' + d + flag;
-            });
-            fields.push({ name: 'Item stock', value: lines.join('\n').slice(0, 1000) });
-            const crit = stockRows.filter(r => r.health === 'critical');
-            if (crit.length) {
-                fields.push({
-                    name: 'Stock critical',
-                    value: crit.map(r => r.name + (r.orderQty ? (' — order ~' + r.orderQty) : '')).join('\n').slice(0, 500)
+        // Light stock summary only when dedicated stock alert is off
+        if (!discordOpts.stockAlert) {
+            const stockRows = analyzeStock(stock);
+            if (stockRows.length) {
+                const lines = stockRows.slice(0, 12).map(r => {
+                    const d = r.days != null ? (' ~' + r.days.toFixed(1) + 'd') : '';
+                    const flag = r.health === 'critical' ? ' ⚠' : (r.health === 'watch' ? ' ·' : '');
+                    return r.name + ': **' + (r.inStock != null ? r.inStock : '?') + '**' + d + flag;
                 });
+                fields.push({ name: 'Item stock', value: lines.join('\n').slice(0, 1000) });
             }
         }
         if (!fields.length) {
@@ -4687,6 +4692,57 @@
             description: (p.name || 'Company') + ' · ' + getTCTParts().dateStr + ' TCT',
             color: 0x3a6ea5,
             fields,
+            timestamp: new Date().toISOString()
+        };
+    }
+
+    /**
+     * Discord stock alert when estimated days left ≤ configured threshold.
+     * Returns null when there is nothing to report (unless forceIncludeEmpty).
+     */
+    function buildStockAlertEmbed(p, stock, opts) {
+        const threshold = stockAlertDaysThreshold();
+        const rows = analyzeStock(stock);
+        const low = rows.filter(r => r.days != null && r.days <= threshold)
+            .sort((a, b) => (a.days || 0) - (b.days || 0));
+        // Also flag items with no sales data but very low absolute stock
+        const lowAbs = rows.filter(r => r.days == null && r.inStock != null && r.inStock < 10);
+        const forceInclude = opts && opts.forceIncludeEmpty;
+
+        if (!low.length && !lowAbs.length) {
+            if (!forceInclude) return null;
+            return {
+                title: 'Stock Alert',
+                description: (p.name || 'Company') + ' · ' + getTCTParts().dateStr + ' TCT',
+                color: 0x4ade80,
+                fields: [{
+                    name: 'Status',
+                    value: 'No items at or below **' + threshold + '** estimated day(s) of stock.'
+                }],
+                timestamp: new Date().toISOString(),
+                _stockAlertEmpty: true
+            };
+        }
+
+        const lines = low.map(r => {
+            const d = r.days != null ? r.days.toFixed(1) + 'd' : '?';
+            const ord = r.orderQty > 0 ? (' · order ~' + r.orderQty) : '';
+            return '**' + r.name + '** — ' + d + ' left' +
+                (r.inStock != null ? (' (' + r.inStock + ' in stock)') : '') + ord;
+        });
+        lowAbs.forEach(r => {
+            lines.push('**' + r.name + '** — low stock (' + r.inStock + ') · no sales rate');
+        });
+
+        return {
+            title: 'Stock Alert · ≤' + threshold + ' day(s)',
+            description: (p.name || 'Company') + ' · ' + getTCTParts().dateStr + ' TCT · ' +
+                (low.length + lowAbs.length) + ' item(s)',
+            color: 0xe67e22,
+            fields: [{
+                name: 'Low stock',
+                value: lines.join('\n').slice(0, 1000)
+            }],
             timestamp: new Date().toISOString()
         };
     }
@@ -4834,9 +4890,13 @@
                 embeds.push(starEmbed);
             }
         }
+        if (discordOpts.stockAlert) {
+            const stockEmbed = buildStockAlertEmbed(p, stock, { forceIncludeEmpty: !!force });
+            if (stockEmbed) embeds.push(stockEmbed);
+        }
 
         if (!embeds.length) {
-            if (force) setStatus('Nothing to post (no star change and no other reports)', true);
+            if (force) setStatus('Nothing to post (no star change, no stock alerts, and no other reports)', true);
             return { ok: false, reason: 'empty' };
         }
 
@@ -5990,8 +6050,34 @@
         if (critical.length) {
             html += `<div class="tcm-warn" style="margin-top:6px">Critical (&lt;2 days): ${critical.map(r => r.name).join(', ')}</div>`;
         }
-        html += `<div class="tcm-peer-note">Days ≈ stock ÷ recent daily sales. Order qty aims for ~${STOCK_TARGET_DAYS} days left after delivery (does not place the order in-game).</div></div>`;
+        const alertDays = stockAlertDaysThreshold();
+        if (discordOpts && discordOpts.stockAlert) {
+            const low = rows.filter(r => r.days != null && r.days <= alertDays);
+            if (low.length) {
+                html += `<div class="tcm-warn" style="margin-top:6px">Discord stock alert (≤${alertDays}d): ${low.map(r => r.name).join(', ')}</div>`;
+            }
+        }
+        html += `<div class="tcm-peer-note">Days ≈ stock ÷ recent daily sales. Order qty aims for ~${STOCK_TARGET_DAYS} days left after delivery (does not place the order in-game). Configure Discord stock alerts on the Discord tab.</div></div>`;
         return html;
+    }
+
+    function renderStockTabHtml(stock) {
+        const stockBlock = stockDaysHtml(stock);
+        if (stockBlock) return stockBlock;
+        const stockItems = Object.values(stock || {});
+        if (stockItems.length) {
+            let html = `<div class="tcm-section"><h4>Stock</h4>`;
+            stockItems.forEach(s => {
+                const inStock = s.in_stock ?? s.amount ?? 0;
+                const cls = inStock < 10 ? 'tcm-bad' : inStock < 50 ? 'tcm-warn' : 'tcm-good';
+                html += `<div class="tcm-row"><span class="tcm-label">${s.name || s.item || 'Item'}</span>
+                    <span class="tcm-value ${cls}">${inStock}</span></div>`;
+            });
+            html += `<div class="tcm-peer-note">Sales rate not available — days-left estimates need sold/day from the API.</div></div>`;
+            return html;
+        }
+        return `<div class="tcm-section"><h4>Stock</h4>
+            <div class="tcm-warn">No stock data returned. Requires a Director key with company stock selection.</div></div>`;
     }
 
 
@@ -6669,7 +6755,7 @@
 
         if (userInfo && userInfo.isDirector) {
             html += `<div style="font-size:12px;color:#aaa;line-height:1.45;margin-top:8px">
-                Simplified summary. Switch to <strong>Director View</strong> for Metrics, Training, Employees, Peers, and Discord.
+                Simplified summary. Switch to <strong>Director View</strong> for Metrics, Stock, Training, Employees, Peers, and Discord.
             </div>`;
         } else {
             html += `<div style="font-size:12px;color:#aaa;line-height:1.45;margin-top:8px">
@@ -6739,9 +6825,10 @@
 
         // Tabs
         const savedTab = GM_getValue('tcmActiveTab', 'training');
-        const tabIds = ['metrics', 'training', 'employees', 'peers', 'discord'];
+        const tabIds = ['metrics', 'stock', 'training', 'employees', 'peers', 'discord'];
         const tabLabels = {
             metrics: 'Metrics',
+            stock: 'Stock',
             training: 'Training',
             employees: 'Employees',
             peers: 'Peers',
@@ -6755,27 +6842,10 @@
         });
         html += `</div>`;
 
-        // Metrics tab — weekly comparison, finance, stock
+        // Metrics tab — weekly comparison, finance, live snapshot (stock has its own tab)
         html += `<div class="tcm-tab-panel${activeTab === 'metrics' ? ' active' : ''}" data-tab-panel="metrics">`;
         html += renderWeeklyMetricsHtml();
         html += renderFinanceStripHtml(p, employees);
-        const stockBlock = stockDaysHtml(stock);
-        if (stockBlock) {
-            html += stockBlock;
-        } else {
-            const stockItems = Object.values(stock);
-            if (stockItems.length) {
-                html += `<div class="tcm-section"><h4>Stock</h4>`;
-                stockItems.forEach(s => {
-                    const inStock = s.in_stock ?? s.amount ?? 0;
-                    const cls = inStock < 10 ? 'tcm-bad' : inStock < 50 ? 'tcm-warn' : 'tcm-good';
-                    html += `<div class="tcm-row"><span class="tcm-label">${s.name || s.item || 'Item'}</span>
-                        <span class="tcm-value ${cls}">${inStock}</span></div>`;
-                });
-                html += `</div>`;
-            }
-        }
-        // One-line live pulse still useful on Metrics
         if (p.popularity != null || p.efficiency != null || p.environment != null || p.company_environment != null || p.advertising_budget != null || p.weekly_income != null) {
             html += `<div class="tcm-section"><h4>Live snapshot</h4>`;
             if (p.popularity != null) html += `<div class="tcm-row"><span class="tcm-label">Popularity</span><span class="tcm-value">${p.popularity}%</span></div>`;
@@ -6787,6 +6857,11 @@
             if (p.weekly_income != null) html += `<div class="tcm-row"><span class="tcm-label">Weekly Income</span><span class="tcm-value">$${Number(p.weekly_income).toLocaleString()}</span></div>`;
             html += `</div>`;
         }
+        html += `</div>`;
+
+        // Stock tab
+        html += `<div class="tcm-tab-panel${activeTab === 'stock' ? ' active' : ''}" data-tab-panel="stock">`;
+        html += renderStockTabHtml(stock);
         html += `</div>`;
 
         // Training tab
@@ -7027,9 +7102,17 @@
 
             <div style="margin:8px 0;line-height:1.8">
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-unused" ${o.unusedTrains ? 'checked' : ''}> Unused Trains</label>
-                <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-metrics" ${o.dailyMetrics ? 'checked' : ''}> Daily Metrics <span style="color:#888">(income, environment, stock, efficiency)</span></label>
+                <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-metrics" ${o.dailyMetrics ? 'checked' : ''}> Daily Metrics <span style="color:#888">(income, environment, efficiency)</span></label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-alerts" ${o.employeeAlerts ? 'checked' : ''}> Employee Alerts <span style="color:#888">(inactivity, unassigned, leaving, addiction, inefficiency)</span></label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-stars" ${o.starChange ? 'checked' : ''}> Star Up / Star Down</label>
+                <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-stock" ${o.stockAlert ? 'checked' : ''}> Stock Alert <span style="color:#888">(items at or below estimated days left)</span></label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:2px 0 0 22px;flex-wrap:wrap">
+                    <span style="color:#aaa;font-size:12px">Alert when days left ≤</span>
+                    <input type="number" id="tcm-d-stock-days" min="0.5" max="30" step="0.5"
+                        value="${Number(o.stockAlertDays) > 0 ? Number(o.stockAlertDays) : 3}"
+                        style="width:64px;padding:4px 6px;background:#111;border:1px solid #555;color:#fff;border-radius:4px;font-size:12px">
+                    <span style="color:#888;font-size:11px">days (default 3)</span>
+                </label>
                 <label style="display:block;cursor:pointer;margin-top:6px"><input type="checkbox" id="tcm-d-auto" ${o.autoPost !== false ? 'checked' : ''}> Daily auto-post at 18:00 TCT</label>
                 <label style="display:block;cursor:pointer"><input type="checkbox" id="tcm-d-weekly" ${o.weeklyPanel !== false ? 'checked' : ''}> Weekly panel Sundays 18:00 TCT</label>
             </div>
@@ -7053,11 +7136,19 @@
 
     function readDiscordOptsFromDom() {
         const chk = id => !!(document.getElementById(id) && document.getElementById(id).checked);
+        const daysEl = document.getElementById('tcm-d-stock-days');
+        let stockAlertDays = 3;
+        if (daysEl) {
+            const n = Number(daysEl.value);
+            if (isFinite(n) && n > 0) stockAlertDays = Math.min(30, Math.max(0.5, n));
+        }
         return {
             unusedTrains: chk('tcm-d-unused'),
             dailyMetrics: chk('tcm-d-metrics'),
             employeeAlerts: chk('tcm-d-alerts'),
             starChange: chk('tcm-d-stars'),
+            stockAlert: chk('tcm-d-stock'),
+            stockAlertDays,
             autoPost: chk('tcm-d-auto'),
             weeklyPanel: chk('tcm-d-weekly')
         };
