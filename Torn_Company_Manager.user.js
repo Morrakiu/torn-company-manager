@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.25.3
+// @version      3.25.4
 // @description  Training contracts, plan, calculator. Peer role-mix advisor (API only). Full positions, PDA, JSONBin, Sheets, TornStats.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
@@ -1256,7 +1256,39 @@
         }
         /* Only #tcm-body scrolls; content/tables expand the scrollable area */
         #tcm-content,.tcm-tab-panel,.tcm-section{overflow:visible}
-        #tcm-panel.collapsed #tcm-body{display:none}
+        /* Minimized: small floating TCM square (Solenya-style) */
+        #tcm-panel.collapsed{
+            width:48px !important;
+            height:48px !important;
+            min-width:48px !important;
+            max-width:48px !important;
+            max-height:48px !important;
+            border-radius:10px;
+            cursor:pointer;
+            box-shadow:0 2px 12px rgba(0,0,0,.55);
+        }
+        #tcm-panel.collapsed #tcm-header{
+            height:100%;
+            padding:0;
+            border-bottom:none;
+            justify-content:center;
+            align-items:center;
+            cursor:pointer;
+            background:#1e2a3a;
+        }
+        #tcm-panel.collapsed #tcm-header h3{
+            margin:0;
+            font-size:13px;
+            font-weight:700;
+            letter-spacing:.6px;
+            color:#7eb8ff;
+            text-align:center;
+            flex:none;
+            line-height:1;
+            user-select:none;
+        }
+        #tcm-panel.collapsed #tcm-header > div{display:none !important}
+        #tcm-panel.collapsed #tcm-body{display:none !important}
         .tcm-section{margin-bottom:14px}
         .tcm-section h4{margin:0 0 6px;color:#7eb8ff;font-size:13px;border-bottom:1px solid #333;padding-bottom:3px}
         .tcm-row{display:flex;justify-content:space-between;gap:8px;margin:3px 0;flex-wrap:wrap}
@@ -1311,7 +1343,7 @@
         .tcm-tab-panel.active{display:block}
         /* Phones / narrow PDA viewports */
         @media (max-width:640px){
-            #tcm-panel{
+            #tcm-panel:not(.collapsed){
                 top:max(8px, env(safe-area-inset-top, 0px));
                 right:max(8px, env(safe-area-inset-right, 0px));
                 left:max(8px, env(safe-area-inset-left, 0px));
@@ -1321,8 +1353,8 @@
                 border-radius:10px;
                 font-size:12px;
             }
-            #tcm-header{padding:8px;cursor:default}
-            #tcm-header h3{font-size:13px}
+            #tcm-panel:not(.collapsed) #tcm-header{padding:8px;cursor:default}
+            #tcm-panel:not(.collapsed) #tcm-header h3{font-size:13px}
             #tcm-body{padding:8px}
             .tcm-btn{padding:6px 10px;font-size:12px;min-height:32px}
             .tcm-tab{padding:8px 10px;font-size:12px}
@@ -1334,12 +1366,12 @@
             .stats-mini{font-size:10px}
         }
         @media (max-width:400px){
-            #tcm-panel{top:4px;left:4px;right:4px;max-height:calc(100dvh - 8px)}
-            #tcm-header h3{font-size:12px}
+            #tcm-panel:not(.collapsed){top:4px;left:4px;right:4px;max-height:calc(100dvh - 8px)}
+            #tcm-panel:not(.collapsed) #tcm-header h3{font-size:12px}
             .tcm-tab{padding:6px 8px;font-size:11px}
         }
         @media (max-height:500px) and (max-width:900px){
-            #tcm-panel{max-height:calc(100dvh - 12px);top:6px}
+            #tcm-panel:not(.collapsed){max-height:calc(100dvh - 12px);top:6px}
         }
     `);
 
@@ -1366,17 +1398,36 @@
         document.body.appendChild(panel);
 
         const header = panel.querySelector('#tcm-header');
-        let dragging = false, ox, oy;
+        const titleEl = header.querySelector('h3');
+        let dragging = false, dragMoved = false, ox, oy;
         const isNarrow = () => window.matchMedia('(max-width: 640px)').matches;
+
+        function setPanelCollapsed(on) {
+            const collapsed = !!on;
+            panel.classList.toggle('collapsed', collapsed);
+            if (titleEl) {
+                if (!titleEl.dataset.fullTitle) titleEl.dataset.fullTitle = titleEl.textContent || 'Company Manager';
+                titleEl.textContent = collapsed ? 'TCM' : (titleEl.dataset.fullTitle || 'Company Manager');
+                titleEl.title = collapsed ? 'Open Company Manager' : '';
+            }
+            const toggleBtn = panel.querySelector('#tcm-toggle');
+            if (toggleBtn) toggleBtn.textContent = collapsed ? '+' : '−';
+            try { GM_setValue('tcmPanelCollapsed', collapsed); } catch (e) { /* ignore */ }
+        }
+
         header.addEventListener('mousedown', e => {
-            if (isNarrow() || e.target.closest('button')) return;
+            // Allow dragging the minimized square on all viewports; expanded: desktop only
+            if (!panel.classList.contains('collapsed') && (isNarrow() || e.target.closest('button'))) return;
+            if (panel.classList.contains('collapsed') && e.target.closest('button')) return;
             dragging = true;
+            dragMoved = false;
             ox = e.clientX - panel.getBoundingClientRect().left;
             oy = e.clientY - panel.getBoundingClientRect().top;
             e.preventDefault();
         });
         document.addEventListener('mousemove', e => {
             if (!dragging) return;
+            dragMoved = true;
             const pad = 4;
             let nx = e.clientX - ox;
             let ny = e.clientY - oy;
@@ -1391,9 +1442,28 @@
             panel.style.right = 'auto';
         });
         document.addEventListener('mouseup', () => { dragging = false; });
+
+        // Click minimized square (without dragging) → expand
+        header.addEventListener('click', e => {
+            if (!panel.classList.contains('collapsed')) return;
+            if (dragMoved) return;
+            if (e.target.closest('button')) return;
+            setPanelCollapsed(false);
+        });
+
         // Keep panel on-screen after rotate / resize
         window.addEventListener('resize', () => {
             if (!document.getElementById('tcm-panel')) return;
+            if (panel.classList.contains('collapsed')) {
+                // Keep floating square on-screen
+                const r = panel.getBoundingClientRect();
+                if (r.right > window.innerWidth - 4 || r.left < 4 || r.top < 4 || r.bottom > window.innerHeight - 4) {
+                    panel.style.left = '';
+                    panel.style.right = '12px';
+                    panel.style.top = '80px';
+                }
+                return;
+            }
             if (isNarrow()) {
                 panel.style.left = '';
                 panel.style.right = '';
@@ -1419,12 +1489,17 @@
             if (companyData) render(companyData);
             else if (apiKey) fetchAll(true);
         };
-        panel.querySelector('#tcm-toggle').onclick = () => {
-            panel.classList.toggle('collapsed');
-            panel.querySelector('#tcm-toggle').textContent = panel.classList.contains('collapsed') ? '+' : '−';
+        panel.querySelector('#tcm-toggle').onclick = (e) => {
+            e.stopPropagation();
+            setPanelCollapsed(!panel.classList.contains('collapsed'));
         };
         panel.querySelector('#tcm-close').onclick = () => panel.remove();
         updateViewModeButton();
+
+        // Restore last minimized state
+        if (GM_getValue('tcmPanelCollapsed', false) === true || GM_getValue('tcmPanelCollapsed', '0') === '1') {
+            setPanelCollapsed(true);
+        }
     }
 
     /** Preferred UI mode: 'employee' | 'director'. Defaults from role if never set. */
