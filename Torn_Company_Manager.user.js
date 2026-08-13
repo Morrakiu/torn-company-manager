@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.25.2
+// @version      3.25.3
 // @description  Training contracts, plan, calculator. Peer role-mix advisor (API only). Full positions, PDA, JSONBin, Sheets, TornStats.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
@@ -1254,16 +1254,20 @@
             -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
             min-height:0;
         }
+        /* Only #tcm-body scrolls; content/tables expand the scrollable area */
+        #tcm-content,.tcm-tab-panel,.tcm-section{overflow:visible}
         #tcm-panel.collapsed #tcm-body{display:none}
         .tcm-section{margin-bottom:14px}
         .tcm-section h4{margin:0 0 6px;color:#7eb8ff;font-size:13px;border-bottom:1px solid #333;padding-bottom:3px}
         .tcm-row{display:flex;justify-content:space-between;gap:8px;margin:3px 0;flex-wrap:wrap}
         .tcm-label{color:#aaa;flex:0 1 auto}.tcm-value{font-weight:bold;text-align:right;flex:1 1 auto;min-width:0;word-break:break-word}
         .tcm-good{color:#6f6}.tcm-warn{color:#fc6}.tcm-bad{color:#f66}
-        .tcm-table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:4px 0;border-radius:4px}
-        table.tcm-emp{width:100%;min-width:280px;border-collapse:collapse;font-size:12px}
+        /* Tables flow in #tcm-body scroll — no nested vertical scrollbars.
+           Horizontal wrap only on narrow viewports (see media query). */
+        .tcm-table-wrap{width:100%;overflow:visible;margin:4px 0;border-radius:4px}
+        table.tcm-emp{width:100%;border-collapse:collapse;font-size:12px;table-layout:auto}
         table.tcm-emp th,table.tcm-emp td{padding:4px 5px;text-align:left;border-bottom:1px solid #333;vertical-align:top}
-        table.tcm-emp th{background:#2a2a2a;color:#ccc;position:sticky;top:0;z-index:1}
+        table.tcm-emp th{background:#2a2a2a;color:#ccc}
         table.tcm-emp td{color:#c8c8c8}
         .tcm-btn{background:#3a6ea5;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin:2px;touch-action:manipulation}
         .tcm-btn:hover{background:#4a8ec5}.tcm-btn.danger{background:#a53a3a}.tcm-btn.secondary{background:#555}
@@ -1291,7 +1295,7 @@
         .tcm-error-box{background:#2a1515;border:1px solid #a53a3a;border-radius:6px;padding:12px;margin-bottom:12px;color:#fcc;line-height:1.5}
         .tcm-error-box strong{color:#f88}
         .tcm-info-box{background:#15202a;border:1px solid #3a6ea5;border-radius:6px;padding:10px;margin-bottom:12px;color:#cde;line-height:1.45;font-size:12px}
-        table.tcm-peer{width:100%;min-width:260px;border-collapse:collapse;font-size:12px;margin-top:6px}
+        table.tcm-peer{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;table-layout:auto}
         table.tcm-peer th,table.tcm-peer td{padding:3px 5px;text-align:left;border-bottom:1px solid #333}
         table.tcm-peer th{background:#2a2a2a;color:#ccc}
         table.tcm-peer td{color:#c8c8c8}
@@ -1322,7 +1326,9 @@
             #tcm-body{padding:8px}
             .tcm-btn{padding:6px 10px;font-size:12px;min-height:32px}
             .tcm-tab{padding:8px 10px;font-size:12px}
-            table.tcm-emp,table.tcm-peer{font-size:11px}
+            /* Horizontal-only scroll for wide tables on phones; vertical stays on #tcm-body */
+            .tcm-table-wrap{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
+            table.tcm-emp,table.tcm-peer{font-size:11px;min-width:280px}
             table.tcm-emp th,table.tcm-emp td,
             table.tcm-peer th,table.tcm-peer td{padding:4px 3px}
             .stats-mini{font-size:10px}
