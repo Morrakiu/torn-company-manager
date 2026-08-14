@@ -16,6 +16,8 @@
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
 // @connect      api.torn.com
+// @connect      discord.com
+// @connect      discordapp.com
 // @connect      api.jsonbin.io
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
@@ -1512,6 +1514,461 @@ function runCapture() {
 
 
       // ---------- JSONBin Data Sync (Web ↔ PDA / multi-device) ----------
+
+      // ---------- Discord panels (log + live panel webhooks) ----------
+      const Discord = {
+          DEFAULT_OPTS: {
+              unusedTrains: false,
+              dailyMetrics: true,
+              employeeAlerts: true,
+              starChange: true,
+              stockAlert: false,
+              stockAlertDays: 3,
+              autoPost: true,
+              weeklyPanel: false
+          },
+
+          getCfg() {
+              return Storage.get('discord_cfg', {
+                  logWebhook: '',
+                  panelWebhook: '',
+                  weeklyWebhook: '',
+                  opts: null,
+                  meta: {}
+              });
+          },
+          saveCfg(c) { Storage.set('discord_cfg', c); },
+
+          getOpts() {
+              const c = this.getCfg();
+              return Object.assign({}, this.DEFAULT_OPTS, c.opts || {});
+          },
+          saveOpts(opts) {
+              const c = this.getCfg();
+              c.opts = Object.assign({}, this.DEFAULT_OPTS, opts || {});
+              this.saveCfg(c);
+          },
+          getMeta() {
+              return Object.assign({}, this.getCfg().meta || {});
+          },
+          saveMeta(meta) {
+              const c = this.getCfg();
+              c.meta = Object.assign({}, c.meta || {}, meta || {});
+              this.saveCfg(c);
+          },
+
+          isValidWebhook(url) {
+              return !!(url && /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(String(url).trim()));
+          },
+          hasAnyWebhook() {
+              const c = this.getCfg();
+              return this.isValidWebhook(c.logWebhook) || this.isValidWebhook(c.panelWebhook) || this.isValidWebhook(c.weeklyWebhook);
+          },
+          anyReportEnabled() {
+              const o = this.getOpts();
+              return !!(o.unusedTrains || o.dailyMetrics || o.employeeAlerts || o.starChange || o.stockAlert);
+          },
+
+          getTCTParts(ts) {
+              const d = ts ? new Date(ts) : new Date();
+              // Torn City Time ≈ UTC
+              return {
+                  hour: d.getUTCHours(),
+                  min: d.getUTCMinutes(),
+                  dateStr: d.toISOString().slice(0, 10)
+              };
+          },
+
+          _xhr(method, url, body) {
+              return new Promise((resolve, reject) => {
+                  if (typeof GM_xmlhttpRequest !== 'function') {
+                      reject(new Error('GM_xmlhttpRequest unavailable'));
+                      return;
+                  }
+                  GM_xmlhttpRequest({
+                      method,
+                      url,
+                      headers: { 'Content-Type': 'application/json' },
+                      data: body != null ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
+                      timeout: 20000,
+                      onload(res) {
+                          let data = null;
+                          try { data = JSON.parse(res.responseText); } catch (_e) { data = res.responseText; }
+                          if (res.status >= 200 && res.status < 300) resolve({ status: res.status, data });
+                          else {
+                              const err = new Error('HTTP ' + res.status);
+                              err.status = res.status;
+                              err.data = data;
+                              reject(err);
+                          }
+                      },
+                      onerror() { reject(new Error('Network error')); },
+                      ontimeout() { reject(new Error('Timeout')); }
+                  });
+              });
+          },
+
+          async postToWebhook(url, body, wait) {
+              const u = String(url).trim() + (wait ? (url.includes('?') ? '&' : '?') + 'wait=true' : '');
+              return this._xhr('POST', u, body);
+          },
+          async editWebhookMessage(url, messageId, body) {
+              const base = String(url).trim().replace(/\/$/, '');
+              const u = base + '/messages/' + encodeURIComponent(messageId);
+              return this._xhr('PATCH', u, body);
+          },
+
+          cleanEmbeds(embeds) {
+              return (embeds || []).filter(Boolean).map(e => {
+                  const out = Object.assign({}, e);
+                  delete out._rating;
+                  delete out._stockAlertEmpty;
+                  if (Array.isArray(out.fields)) {
+                      out.fields = out.fields.filter(f => f && f.name && f.value != null)
+                          .map(f => ({ name: String(f.name).slice(0, 256), value: String(f.value).slice(0, 1024), inline: !!f.inline }));
+                  }
+                  if (out.title) out.title = String(out.title).slice(0, 256);
+                  if (out.description) out.description = String(out.description).slice(0, 4096);
+                  return out;
+              }).slice(0, 10);
+          },
+
+          _estimateDailyTrains(profile, employees) {
+              const rating = parseInt(profile?.rating || 0, 10) || 0;
+              const stars = Math.max(1, Math.min(10, rating || 1));
+              // Rough: 1 train base + star bonuses (aligned with common TCM estimates)
+              let daily = Math.min(10, 1 + Math.floor(stars / 2));
+              let hasTrainer = false;
+              for (const emp of Object.values(employees || {})) {
+                  if (!emp) continue;
+                  const pos = String(emp.position || '');
+                  if (/trainer|hr officer|human resources/i.test(pos)) hasTrainer = true;
+              }
+              if (hasTrainer) daily += 1;
+              return { daily, rating: stars, hasTrainer };
+          },
+
+          _trainedTodayCount() {
+              const log = Storage.getTrainedLog() || {};
+              const today = this.getTCTParts().dateStr;
+              let n = 0;
+              for (const entries of Object.values(log)) {
+                  if (!Array.isArray(entries)) continue;
+                  for (const e of entries) {
+                      if (e && e.date === today) n++;
+                  }
+              }
+              return n;
+          },
+
+          buildUnusedTrainsEmbed(profile, employees) {
+              const trainEst = this._estimateDailyTrains(profile, employees);
+              const loggedToday = this._trainedTodayCount();
+              const log = Storage.getTrainedLog() || {};
+              let totalLogged = 0;
+              for (const entries of Object.values(log)) {
+                  if (Array.isArray(entries)) totalLogged += entries.length;
+              }
+              const fields = [
+                  { name: 'Est. trains / day', value: String(trainEst.daily), inline: true },
+                  { name: 'Rating', value: '★' + trainEst.rating, inline: true },
+                  { name: 'Trainer staffed', value: trainEst.hasTrainer ? 'Yes' : 'No', inline: true },
+                  { name: 'Train actions logged today (TCT)', value: String(loggedToday), inline: true },
+                  { name: 'Lifetime logged trains', value: String(totalLogged), inline: true }
+              ];
+              if (loggedToday < trainEst.daily) {
+                  fields.push({
+                      name: 'Possible unused',
+                      value: 'Up to **' + Math.max(0, trainEst.daily - loggedToday) + '** trains may still be available today (estimate).'
+                  });
+              } else {
+                  fields.push({ name: 'Status', value: 'Log suggests daily capacity was used (or exceeded).' });
+              }
+              return {
+                  title: 'Unused Trains',
+                  color: 0xf0c040,
+                  fields,
+                  timestamp: new Date().toISOString()
+              };
+          },
+
+          buildDailyMetricsEmbed(profile, stock) {
+              const p = profile || {};
+              const fields = [];
+              const add = (name, val, inline) => {
+                  if (val == null || val === '') return;
+                  fields.push({ name, value: String(val), inline: !!inline });
+              };
+              const money = (n) => (n == null || n === '') ? null : ('$' + Number(n).toLocaleString('en-US'));
+              add('Daily income', money(p.daily_income), true);
+              add('Weekly income', money(p.weekly_income), true);
+              add('Bank', money(p.company_bank != null ? p.company_bank : p.bank), true);
+              add('Popularity', p.popularity != null ? p.popularity + '%' : null, true);
+              add('Efficiency', p.efficiency != null ? p.efficiency + '%' : (p.company_efficiency != null ? p.company_efficiency + '%' : null), true);
+              add('Environment', p.environment != null ? p.environment : (p.company_environment != null ? p.company_environment : null), true);
+              add('Rating', p.rating != null ? '★' + p.rating : null, true);
+              add('Employees',
+                  (p.employees_hired != null ? p.employees_hired : '?') + ' / ' +
+                  (p.employees_capacity != null ? p.employees_capacity : '?'), true);
+
+              const opts = this.getOpts();
+              if (!opts.stockAlert && stock && typeof stock === 'object') {
+                  const lines = [];
+                  for (const [name, s] of Object.entries(stock)) {
+                      if (!s || typeof s !== 'object') continue;
+                      const inStock = s.in_stock != null ? s.in_stock : (s.stock != null ? s.stock : null);
+                      if (inStock == null) continue;
+                      lines.push(name + ': **' + inStock + '**');
+                      if (lines.length >= 12) break;
+                  }
+                  if (lines.length) fields.push({ name: 'Item stock', value: lines.join('\n').slice(0, 1000) });
+              }
+              if (!fields.length) {
+                  fields.push({ name: 'Note', value: 'Limited metrics available from API for this key/role.' });
+              }
+              return {
+                  title: 'Daily Metrics',
+                  description: (p.name || 'Company') + ' · ' + this.getTCTParts().dateStr + ' TCT',
+                  color: 0x3a6ea5,
+                  fields,
+                  timestamp: new Date().toISOString()
+              };
+          },
+
+          buildEmployeeAlertsEmbed(profile, employees) {
+              const p = profile || {};
+              const alerts = [];
+              const now = Date.now();
+              const inactiveDays = Storage.getSettings().inactiveThreshold ?? 3;
+              for (const [id, emp] of Object.entries(employees || {})) {
+                  if (!emp) continue;
+                  const name = emp.name || ('#' + id);
+                  const pos = emp.position || '?';
+                  if (emp.status && /hospital|jail/i.test(String(emp.status.state || emp.status || ''))) {
+                      alerts.push('**' + name + '** (' + pos + ') — ' + (emp.status.state || emp.status));
+                  }
+                  const last = emp.last_action?.timestamp
+                      ? emp.last_action.timestamp * (emp.last_action.timestamp < 1e12 ? 1000 : 1)
+                      : (emp.last_action?.relative ? null : null);
+                  if (last) {
+                      const days = (now - last) / 86400000;
+                      if (days >= inactiveDays) {
+                          alerts.push('**' + name + '** (' + pos + ') — inactive ~' + days.toFixed(1) + 'd');
+                      }
+                  } else if (emp.last_action?.relative && /day|week|month/i.test(emp.last_action.relative)) {
+                      // relative string like "2 days ago"
+                      const m = String(emp.last_action.relative).match(/(\d+)\s*day/i);
+                      if (m && parseInt(m[1], 10) >= inactiveDays) {
+                          alerts.push('**' + name + '** (' + pos + ') — ' + emp.last_action.relative);
+                      }
+                  }
+              }
+              if (!alerts.length) {
+                  return {
+                      title: 'Employee Alerts',
+                      description: (p.name || 'Company') + ' · ' + this.getTCTParts().dateStr + ' TCT',
+                      color: 0x57f287,
+                      fields: [{ name: 'Status', value: 'No inactivity / hospital / jail alerts.' }],
+                      timestamp: new Date().toISOString()
+                  };
+              }
+              return {
+                  title: 'Employee Alerts',
+                  description: (p.name || 'Company') + ' · ' + alerts.length + ' alert(s)',
+                  color: 0xed4245,
+                  fields: [{ name: 'Alerts', value: alerts.slice(0, 20).join('\n').slice(0, 1000) }],
+                  timestamp: new Date().toISOString()
+              };
+          },
+
+          buildStarChangeEmbed(profile) {
+              const p = profile || {};
+              const rating = parseInt(p.rating || 0, 10) || 0;
+              const meta = this.getMeta();
+              const prev = meta.lastRating != null ? meta.lastRating : null;
+              let desc = (p.name || 'Company') + ' is **★' + rating + '**';
+              if (prev != null && prev !== rating) {
+                  desc += prev < rating ? (' (up from ★' + prev + ')') : (' (down from ★' + prev + ')');
+              }
+              return {
+                  title: 'Star Rating',
+                  description: desc,
+                  color: 0xfee75c,
+                  fields: [],
+                  timestamp: new Date().toISOString(),
+                  _rating: rating
+              };
+          },
+
+          _stockDaysLeft(s) {
+              // crude estimate: in_stock / sold_amount if sold available
+              const inStock = Number(s.in_stock != null ? s.in_stock : s.stock) || 0;
+              const sold = Number(s.sold_amount != null ? s.sold_amount : s.sold) || 0;
+              if (sold > 0) return inStock / sold;
+              return null;
+          },
+
+          buildStockAlertEmbed(profile, stock, opts) {
+              const threshold = Math.min(30, Math.max(0.5, Number(this.getOpts().stockAlertDays) || 3));
+              const low = [];
+              const lowAbs = [];
+              for (const [name, s] of Object.entries(stock || {})) {
+                  if (!s || typeof s !== 'object') continue;
+                  const days = this._stockDaysLeft(s);
+                  const inStock = Number(s.in_stock != null ? s.in_stock : s.stock);
+                  if (days != null && days <= threshold) low.push({ name, days, inStock });
+                  else if ((days == null || !isFinite(days)) && inStock != null && inStock < 10) lowAbs.push({ name, inStock });
+              }
+              low.sort((a, b) => (a.days || 0) - (b.days || 0));
+              const forceInclude = opts && opts.forceIncludeEmpty;
+              if (!low.length && !lowAbs.length) {
+                  if (!forceInclude) return null;
+                  return {
+                      title: 'Stock Alert',
+                      description: (profile?.name || 'Company') + ' · ' + this.getTCTParts().dateStr + ' TCT',
+                      color: 0x57f287,
+                      fields: [{ name: 'Status', value: 'No items at or below **' + threshold + '** estimated day(s) of stock.' }],
+                      timestamp: new Date().toISOString(),
+                      _stockAlertEmpty: true
+                  };
+              }
+              const lines = low.map(r => {
+                  const d = r.days != null ? r.days.toFixed(1) + 'd' : '?';
+                  return '**' + r.name + '** — ' + d + ' left' + (r.inStock != null ? (' (' + r.inStock + ' in stock)') : '');
+              });
+              lowAbs.forEach(r => lines.push('**' + r.name + '** — low stock (' + r.inStock + ') · no sales rate'));
+              return {
+                  title: 'Stock Alert · ≤' + threshold + ' day(s)',
+                  description: (profile?.name || 'Company') + ' · ' + (low.length + lowAbs.length) + ' item(s)',
+                  color: 0xe67e22,
+                  fields: [{ name: 'Low stock', value: lines.join('\n').slice(0, 1000) }],
+                  timestamp: new Date().toISOString()
+              };
+          },
+
+          async runReports(state, force) {
+              const cfg = this.getCfg();
+              const opts = this.getOpts();
+              const hasLog = this.isValidWebhook(cfg.logWebhook);
+              const hasPanel = this.isValidWebhook(cfg.panelWebhook);
+              if (!hasLog && !hasPanel) {
+                  if (force) throw new Error('Set at least one Discord webhook in Settings');
+                  return { ok: false, reason: 'no_webhook' };
+              }
+              if (!this.anyReportEnabled()) {
+                  if (force) throw new Error('Enable at least one Discord report option');
+                  return { ok: false, reason: 'no_opts' };
+              }
+              if (!state || !state.profile) {
+                  if (force) throw new Error('Load company data first');
+                  return { ok: false, reason: 'no_data' };
+              }
+
+              const p = state.profile;
+              const employees = state.employees || {};
+              const stock = state.stock || {};
+              const embeds = [];
+              let starEmbed = null;
+
+              if (opts.unusedTrains) embeds.push(this.buildUnusedTrainsEmbed(p, employees));
+              if (opts.dailyMetrics) embeds.push(this.buildDailyMetricsEmbed(p, stock));
+              if (opts.employeeAlerts) embeds.push(this.buildEmployeeAlertsEmbed(p, employees));
+              if (opts.starChange) {
+                  starEmbed = this.buildStarChangeEmbed(p);
+                  const meta = this.getMeta();
+                  if (force || meta.lastRating == null || (starEmbed._rating != null && starEmbed._rating !== meta.lastRating)) {
+                      embeds.push(starEmbed);
+                  }
+              }
+              if (opts.stockAlert) {
+                  const se = this.buildStockAlertEmbed(p, stock, { forceIncludeEmpty: !!force });
+                  if (se) embeds.push(se);
+              }
+
+              if (!embeds.length) {
+                  if (force) throw new Error('Nothing to post for current options');
+                  return { ok: false, reason: 'empty' };
+              }
+
+              const clean = this.cleanEmbeds(embeds);
+              const tct = this.getTCTParts();
+              const body = {
+                  username: 'TCM ALPHA',
+                  content: '**Company reports** · **' + tct.dateStr + '** TCT' + (force ? ' (manual)' : ''),
+                  embeds: clean
+              };
+
+              const results = { log: false, panel: false };
+              const errors = [];
+              const meta = this.getMeta();
+
+              // Permanent log — always append
+              if (hasLog) {
+                  try {
+                      await this.postToWebhook(cfg.logWebhook, body, false);
+                      results.log = true;
+                  } catch (e) {
+                      errors.push('log: ' + (e.message || e));
+                  }
+              }
+
+              // Live panel — edit in place when message id known
+              if (hasPanel) {
+                  try {
+                      const existingId = meta.panelMessageId;
+                      if (existingId) {
+                          try {
+                              await this.editWebhookMessage(cfg.panelWebhook, existingId, body);
+                              results.panel = true;
+                          } catch (e) {
+                              // Message may have been deleted — post new
+                              const res = await this.postToWebhook(cfg.panelWebhook, body, true);
+                              const newId = res?.data?.id;
+                              if (newId) {
+                                  meta.panelMessageId = String(newId);
+                                  results.panel = true;
+                              }
+                          }
+                      } else {
+                          const res = await this.postToWebhook(cfg.panelWebhook, body, true);
+                          const newId = res?.data?.id;
+                          if (newId) {
+                              meta.panelMessageId = String(newId);
+                              results.panel = true;
+                          }
+                      }
+                  } catch (e) {
+                      errors.push('panel: ' + (e.message || e));
+                  }
+              }
+
+              if (starEmbed && starEmbed._rating != null) meta.lastRating = starEmbed._rating;
+              meta.lastPostDateTCT = tct.dateStr;
+              meta.lastPostTs = Date.now();
+              this.saveMeta(meta);
+
+              if (errors.length && !results.log && !results.panel) {
+                  throw new Error(errors.join('; '));
+              }
+              return { ok: true, results, errors };
+          },
+
+          /** Auto-post once per TCT day after 18:00 if enabled */
+          maybeAutoPost(state) {
+              try {
+                  const opts = this.getOpts();
+                  if (!opts.autoPost || !this.hasAnyWebhook() || !this.anyReportEnabled()) return;
+                  const tct = this.getTCTParts();
+                  if (tct.hour < 18) return;
+                  const meta = this.getMeta();
+                  if (meta.lastPostDateTCT === tct.dateStr) return;
+                  this.runReports(state, false).catch(e => console.warn('[TCM] Discord auto-post failed:', e));
+              } catch (e) {
+                  console.warn('[TCM] Discord auto-post error:', e);
+              }
+          }
+      };
+
       const JsonBinSync = {
           getCfg() {
               return Storage.get('jsonbin_sync_cfg', {
@@ -1625,6 +2082,7 @@ function runCapture() {
                   schedule_config: (typeof Storage.getScheduleConfig === 'function' ? Storage.getScheduleConfig() : Storage.get('schedule_config', null)),
                   schedule_overrides: (typeof Storage.getScheduleOverrides === 'function' ? Storage.getScheduleOverrides() : Storage.get('schedule_overrides', null)),
                   google_sync_cfg: Storage.get('google_sync_cfg', null),
+                  discord_cfg: Storage.get('discord_cfg', null),
                   overrides: (typeof Storage.getOverrides === 'function' ? Storage.getOverrides() : Storage.get('overrides', {})),
                   settings: (() => {
                       // Full settings sync — strip secrets only
@@ -1692,6 +2150,11 @@ function runCapture() {
               if (body.schedule_overrides && typeof body.schedule_overrides === 'object') {
                   if (typeof Storage.saveScheduleOverrides === 'function') Storage.saveScheduleOverrides(body.schedule_overrides);
                   else Storage.set('schedule_overrides', body.schedule_overrides);
+              }
+              if (body.discord_cfg && typeof body.discord_cfg === 'object') {
+                  const dLocal = Storage.get('discord_cfg', {}) || {};
+                  // merge but never clobber local webhooks with empty remote strings lightly
+                  Storage.set('discord_cfg', { ...dLocal, ...body.discord_cfg, opts: { ...(dLocal.opts||{}), ...((body.discord_cfg.opts)||{}) }, meta: { ...(dLocal.meta||{}), ...((body.discord_cfg.meta)||{}) } });
               }
               if (body.google_sync_cfg && typeof body.google_sync_cfg === 'object') {
                   const gLocal = Storage.get('google_sync_cfg', {}) || {};
@@ -4611,7 +5074,6 @@ _errorMsg(code, raw) {
                       { id: 'optimize',    label: 'Optimize'    },
                       { id: 'projections', label: 'Projections' },
                       { id: 'benchmark',   label: 'Benchmark'   },
-                      { id: 'rolemix',     label: 'Role Mix'    },
                   ],
 training: [
                       { id: 'rotation', label: 'Training'  },
@@ -4656,6 +5118,9 @@ training: [
                       wrap.querySelectorAll('.tcm-cat').forEach(c => c.classList.remove('active'));
                       catEl.classList.add('active');
                       this._currentCat = catEl.dataset.cat;
+                      const _tb = document.getElementById('tcm-tabs');
+                      if (_tb) _tb.style.display = '';
+                      if (this._currentTab === 'settings') this._currentTab = null;
                       const firstTab = (_CAT_MAP[catEl.dataset.cat] || [])[0]?.id || 'overview';
                       this._renderSubTabs(catEl.dataset.cat, firstTab);
                       this._renderTab(firstTab);
@@ -4687,7 +5152,9 @@ training: [
                   if (s2.pinned) { wrap.classList.add('pinned'); wrap.querySelector('#tcm-btn-pin').classList.add('active'); }
                   else { wrap.classList.remove('pinned'); wrap.querySelector('#tcm-btn-pin').classList.remove('active'); }
               });
-              wrap.querySelector('#tcm-btn-settings').addEventListener('click', () => this._renderSettings());
+              wrap.querySelector('#tcm-btn-settings').addEventListener('click', () => {
+                  this._openSettingsPage();
+              });
 
 launcher.addEventListener('click', () => {
                   if (wrap.style.display !== 'none') { wrap.style.display = 'none'; return; }
@@ -4707,6 +5174,10 @@ App._pendingLoad = false;
           _currentCat: 'management',
 
           _renderTab(tab) {
+              if (tab && tab !== 'settings') {
+                  const _tb = document.getElementById('tcm-tabs');
+                  if (_tb) _tb.style.display = '';
+              }
               this._currentTab = tab;
               const body = document.getElementById('tcm-body');
               if (!body) return;
@@ -5469,7 +5940,6 @@ App._pendingLoad = false;
                       break;
                   case 'calc':         body.innerHTML = _ub + this._tabCalc(this.state); this._attachCalcHandlers(this.state); break;
                   case 'benchmark':    body.innerHTML = _ub + this._tabBenchmark(this.state); this._attachBenchmarkHandlers(this.state); break;
-                  case 'rolemix':      body.innerHTML = _ub + this._tabRoleMix(this.state); this._attachRoleMixHandlers(this.state); break;
 case 'proxy_keys':
                   case 'proxy_compare':
                   case 'proxy_history':
@@ -5548,7 +6018,7 @@ const skipOnRefresh = ['calc', 'settings', 'verify'];
   const _onHiringSubTab = this._currentTab === 'optimize' && (Storage.getSettings().optSubTab || 'optimizer') === 'hiring';
   if (!skipOnRefresh.includes(this._currentTab) && !(silent && _onHiringSubTab)) {
 
-const _catForTab = { overview:'management', finance:'management', stock:'management', recs:'expansion', optimize:'expansion', projections:'expansion', benchmark:'expansion', rolemix:'expansion', rotation:'training', calc:'training', proxy_keys:'proxy', proxy_compare:'proxy', proxy_history:'proxy', proxy_ee_perf:'proxy' };
+const _catForTab = { overview:'management', finance:'management', stock:'management', recs:'expansion', optimize:'expansion', projections:'expansion', benchmark:'expansion', rotation:'training', calc:'training', proxy_keys:'proxy', proxy_compare:'proxy', proxy_history:'proxy', proxy_ee_perf:'proxy' };
                   const _syncCat = _catForTab[this._currentTab] || 'management';
                   if (_syncCat !== this._currentCat) {
                       this._currentCat = _syncCat;
@@ -10832,213 +11302,6 @@ const _prSavedPos = Storage.get(posKey, '');
               <div style="font-size:10px;color:#888;margin-top:4px;">Pure WS EE only — no bonuses, no addiction applied · Uses ${posName} stat requirements</div>`;
           },
 
-
-
-          /**
-           * Role-mix tab — peer position averages vs your roster (Morrakiu TCM logic).
-           * Uses Benchmark cache rosters: company/{id}?selections=employees via prior Load Benchmark.
-           * Peer avg = mean headcount in each role across peers with role data; gap = peerAvg - yours.
-           * Optional scaled targets = peerAvg redistributed to your non-director headcount.
-           */
-          _buildRoleMixReport(state) {
-              const profile = state?.profile || {};
-              const employees = state?.employees || {};
-              const typeName = state?.typeName || '';
-              const settings = Storage.getSettings();
-              const savedCat = App._benchSelectedCat || settings.benchSelectedCat || 'same';
-              const benchSameSize = !!settings.benchSameSize;
-              const cache = Storage.getBenchmarkCache(savedCat, benchSameSize);
-              const compData = (cache && cache.companyData) || {};
-              const companies = (cache && cache.companies) || {};
-
-              // Canonical role name (Morrakiu-style: aliases + PosNorm)
-              const canonRole = (pos) => {
-                  const raw = String(pos || '').trim();
-                  if (!raw || raw === 'Director') return null;
-                  try {
-                      if (typeof PosNorm !== 'undefined' && PosNorm.normalize) {
-                          return PosNorm.normalize(raw) || raw;
-                      }
-                  } catch (_e) {}
-                  return (TCM.POSITION_ALIASES && TCM.POSITION_ALIASES[raw]) || raw;
-              };
-
-              // Your role counts (Director excluded — not a staffing slot)
-              const yoursMap = {};
-              let yourStaff = 0;
-              for (const emp of Object.values(employees)) {
-                  if (!emp) continue;
-                  const role = canonRole(emp.position);
-                  if (!role) continue;
-                  yoursMap[role] = (yoursMap[role] || 0) + 1;
-                  yourStaff++;
-              }
-
-              const peerIds = Object.keys(compData).filter(id => {
-                  const roster = compData[id];
-                  if (!roster || typeof roster !== 'object') return false;
-                  return Object.values(roster).some(e => e && canonRole(e.position));
-              });
-
-              // Per-peer role counts, then average across peers (Morrakiu lastPeerReport logic)
-              const roleTotals = {}; // sum of per-peer counts
-              let peersWithRoles = 0;
-              for (const id of peerIds) {
-                  const counts = {};
-                  for (const emp of Object.values(compData[id] || {})) {
-                      if (!emp) continue;
-                      const role = canonRole(emp.position);
-                      if (!role) continue;
-                      counts[role] = (counts[role] || 0) + 1;
-                  }
-                  const n = Object.values(counts).reduce((a, b) => a + b, 0);
-                  if (n < 1) continue;
-                  peersWithRoles++;
-                  for (const [role, cnt] of Object.entries(counts)) {
-                      roleTotals[role] = (roleTotals[role] || 0) + cnt;
-                  }
-              }
-
-              const allRoles = new Set([...Object.keys(yoursMap), ...Object.keys(roleTotals)]);
-              const denom = peersWithRoles || 0;
-              const rows = [];
-              for (const role of allRoles) {
-                  const yours = yoursMap[role] || 0;
-                  const peerAvg = denom ? (roleTotals[role] || 0) / denom : 0;
-                  rows.push({
-                      role,
-                      yours,
-                      peerAvg,
-                      gap: peerAvg - yours
-                  });
-              }
-              // Sort: largest peer avg first, then by |gap|
-              rows.sort((a, b) => (b.peerAvg - a.peerAvg) || (Math.abs(b.gap) - Math.abs(a.gap)));
-
-              // Scaled targets to our headcount (getPeerRoleTargets logic)
-              let targets = null;
-              if (denom && yourStaff > 0 && rows.length) {
-                  const sumAvg = rows.reduce((s, r) => s + (Number(r.peerAvg) || 0), 0);
-                  if (sumAvg > 0) {
-                      targets = {};
-                      for (const r of rows) {
-                          targets[r.role] = ((Number(r.peerAvg) || 0) / sumAvg) * yourStaff;
-                      }
-                  }
-              }
-
-              // Persist lightweight report for other features (Best Position / optimize)
-              try {
-                  const report = {
-                      typeName,
-                      peerCount: peerIds.length,
-                      peersWithRoles,
-                      rows,
-                      targets,
-                      yourStaff,
-                      filter: savedCat,
-                      sameSize: benchSameSize,
-                      updated: Date.now()
-                  };
-                  GM_setValue(TCM.NS + 'lastPeerReport', JSON.stringify(report));
-              } catch (_e) {}
-
-              return {
-                  cache,
-                  savedCat,
-                  benchSameSize,
-                  peerIds,
-                  peersWithRoles,
-                  rows,
-                  targets,
-                  yourStaff,
-                  typeName,
-                  companies
-              };
-          },
-
-          _tabRoleMix(state) {
-              const catLabels = { same: 'Same ★', above: 'Above ★', top: 'Top', ten: '10★' };
-              const report = this._buildRoleMixReport(state);
-              const { cache, savedCat, benchSameSize, peersWithRoles, rows, targets, yourStaff, typeName } = report;
-
-              let html = `<div class="tcm-section-label">Role Mix
-                  <span style="font-size:10px;color:#888;font-weight:400;text-transform:none;letter-spacing:0;">
-                      ${typeName ? '· ' + typeName : ''} · ${catLabels[savedCat] || savedCat}${benchSameSize ? ' · same size' : ''}
-                  </span>
-              </div>`;
-              html += `<div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:10px;">
-                  Compares your non-director staffing to the <strong>average role counts</strong> of peers in the current Benchmark pool.
-                  Uses Torn API <code>company/{id}?selections=employees</code> (loaded via <strong>Expansion → Benchmark</strong>).
-                  Gap = peer avg − you (positive = peers staff this role more). Target* = peer mix scaled to your headcount.
-              </div>`;
-
-              if (!cache || !Object.keys(cache.companyData || {}).length) {
-                  html += `<div class="tcm-rec medium"><div class="rec-title">No peer roster data</div>
-                      <div class="rec-body">Load a benchmark first: open <strong>Expansion → Benchmark</strong>, pick a filter, then <strong>Load Benchmark</strong>.
-                      Role mix will use those company rosters.</div></div>
-                      <button class="tcm-btn green" id="tcm-rolemix-goto-bench" style="margin-top:8px;">Go to Benchmark</button>`;
-                  return html;
-              }
-
-              if (!peersWithRoles) {
-                  html += `<div class="tcm-rec medium"><div class="rec-title">Peers loaded but no role data</div>
-                      <div class="rec-body">${Object.keys(cache.companyData || {}).length} companies in cache, but no non-director positions were found. Reload benchmark.</div></div>`;
-                  return html;
-              }
-
-              html += `<div class="tcm-card" style="margin-bottom:10px;"><div class="tcm-card-body">
-                  <div class="tcm-row"><span class="lbl">Peers with role data</span><span class="val">${peersWithRoles}</span></div>
-                  <div class="tcm-row"><span class="lbl">Your staff (excl. Director)</span><span class="val">${yourStaff}</span></div>
-                  <div class="tcm-row"><span class="lbl">Positions compared</span><span class="val">${rows.length}</span></div>
-              </div></div>`;
-
-              html += `<div style="overflow-x:auto;"><table class="tcm-emp" style="width:100%;border-collapse:collapse;font-size:12px;">
-                  <thead><tr>
-                      <th style="text-align:left;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Position</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">You</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Peer avg</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Gap</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Target*</th>
-                  </tr></thead><tbody>`;
-
-              for (const row of rows) {
-                  const gap = Number(row.gap) || 0;
-                  const gapCol = gap >= 0.75 ? '#fc6' : gap <= -0.75 ? '#6f6' : '#c8c8c8';
-                  const gapStr = (gap >= 0 ? '+' : '') + gap.toFixed(1);
-                  const tgt = targets && targets[row.role] != null ? targets[row.role].toFixed(1) : '—';
-                  html += `<tr>
-                      <td style="padding:4px 6px;border-bottom:1px solid #333;color:#c8c8c8;">${row.role}</td>
-                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#ddd;">${row.yours}</td>
-                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#aaa;">${Number(row.peerAvg).toFixed(1)}</td>
-                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:${gapCol};font-weight:600;">${gapStr}</td>
-                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#7eb8ff;">${tgt}</td>
-                  </tr>`;
-              }
-              html += `</tbody></table></div>`;
-              html += `<div style="font-size:11px;color:#888;margin-top:8px;line-height:1.45;">
-                  * <strong>Target</strong> = peer role mix scaled to your headcount (${yourStaff}) for staffing guidance.
-                  Roles with gap ≥ +0.75 are under-filled vs peers; ≤ −0.75 are over-staffed vs peers.
-              </div>
-              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-                  <button class="tcm-btn" id="tcm-rolemix-refresh">↻ Recalculate</button>
-                  <button class="tcm-btn" id="tcm-rolemix-goto-bench">Benchmark settings</button>
-              </div>`;
-              return html;
-          },
-
-          _attachRoleMixHandlers(state) {
-              document.getElementById('tcm-rolemix-goto-bench')?.addEventListener('click', () => {
-                  // Switch to expansion / benchmark sub-tab
-                  document.querySelectorAll('.tcm-cat').forEach(c => c.classList.toggle('active', c.dataset.cat === 'expansion'));
-                  if (typeof this._renderSubTabs === 'function') this._renderSubTabs('expansion', 'benchmark');
-                  this._renderTab('benchmark');
-              });
-              document.getElementById('tcm-rolemix-refresh')?.addEventListener('click', () => {
-                  this._renderTab('rolemix');
-              });
-          },
-
           _tabBenchmark(state) {
               const { typeName, typeInt } = state;
               if (!typeName || !typeInt) return '<div class="tcm-notice">Company data not loaded. Refresh first.</div>';
@@ -13122,8 +13385,44 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
           },
 
 
+          _openSettingsPage() {
+              this._settingsReturnTab = (this._currentTab && this._currentTab !== 'settings')
+                  ? this._currentTab
+                  : (this._settingsReturnTab || 'overview');
+              this._settingsReturnCat = this._currentCat || 'management';
+              this._currentTab = 'settings';
+              this._currentCat = 'settings';
+              // Clear category + sub-tab highlights so Settings is a dedicated page
+              document.querySelectorAll('.tcm-cat').forEach(c => c.classList.remove('active'));
+              const sub = document.getElementById('tcm-sub-tabs');
+              if (sub) sub.innerHTML = '';
+              const tabsBar = document.getElementById('tcm-tabs');
+              if (tabsBar) tabsBar.style.display = 'none';
+              this._renderSettings();
+          },
+
+          _leaveSettingsPage() {
+              const tabsBar = document.getElementById('tcm-tabs');
+              if (tabsBar) tabsBar.style.display = '';
+              const cat = this._settingsReturnCat || 'management';
+              const tab = this._settingsReturnTab || 'overview';
+              this._currentCat = cat;
+              this._currentTab = tab;
+              document.querySelectorAll('.tcm-cat').forEach(c => c.classList.toggle('active', c.dataset.cat === cat));
+              if (typeof this._renderSubTabs === 'function') this._renderSubTabs(cat, tab);
+              if (this.state) this._renderTab(tab);
+              else this._renderTab(tab);
+          },
+
           _renderSettings() {
       this._currentTab = 'settings';
+      this._currentCat = 'settings';
+      // Keep chrome in settings mode (no leftover category highlight)
+      document.querySelectorAll('.tcm-cat').forEach(c => c.classList.remove('active'));
+      const _subTabs = document.getElementById('tcm-sub-tabs');
+      if (_subTabs) _subTabs.innerHTML = '';
+      const _tabsBar = document.getElementById('tcm-tabs');
+      if (_tabsBar) _tabsBar.style.display = 'none';
       const body = document.getElementById('tcm-body');
       const s = Storage.getSettings();
               const stocks = s.stocks || {};
@@ -13384,6 +13683,59 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   </div>
                   <button class="tcm-btn" id="tcm-fin-colors-save" style="margin-bottom:12px;">Save Sheet Colors</button>
                   <hr class="tcm-divider">
+                  <div class="tcm-section-label">Discord Reports</div>
+                  <div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">
+                      Optional Discord webhooks. <strong>Permanent log</strong> appends a new message each post.
+                      <strong>Daily data panel</strong> edits one message in place (live panel).
+                      Auto-post runs once per day after <strong>18:00 TCT</strong> when enabled and company data is loaded.
+                  </div>
+                  ${(() => {
+                      const _dc = Discord.getCfg();
+                      const _o = Discord.getOpts();
+                      const _m = Discord.getMeta();
+                      const esc = (u) => String(u || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+                      const last = _m.lastPostDateTCT
+                          ? ('Last post: <strong style="color:#7eb8ff;">' + _m.lastPostDateTCT + '</strong> TCT')
+                          : 'No posts yet';
+                      const panelNote = _m.panelMessageId
+                          ? ('Panel msg: <code style="color:#aaa;font-size:10px;">' + String(_m.panelMessageId).slice(0, 14) + '…</code>')
+                          : 'Panel message: not created yet';
+                      const badge = (ok) => ok
+                          ? '<span style="color:#6f6;font-size:10px;">✓ valid</span>'
+                          : '<span style="color:#888;font-size:10px;">not set</span>';
+                      return `
+                  <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">Permanent log webhook ${badge(Discord.isValidWebhook(_dc.logWebhook))}</label>
+                  <input class="tcm-input" id="tcm-discord-log-hook" type="password" placeholder="https://discord.com/api/webhooks/..."
+                      value="${esc(_dc.logWebhook)}" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />
+                  <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">Daily data panel webhook ${badge(Discord.isValidWebhook(_dc.panelWebhook))}</label>
+                  <input class="tcm-input" id="tcm-discord-panel-hook" type="password" placeholder="https://discord.com/api/webhooks/..."
+                      value="${esc(_dc.panelWebhook)}" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />
+                  <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">Weekly panel webhook (optional) ${badge(Discord.isValidWebhook(_dc.weeklyWebhook))}</label>
+                  <input class="tcm-input" id="tcm-discord-weekly-hook" type="password" placeholder="https://discord.com/api/webhooks/..."
+                      value="${esc(_dc.weeklyWebhook)}" style="width:100%;box-sizing:border-box;margin-bottom:10px;" />
+                  <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:4px 0 8px;">Report options</div>
+                  <div style="display:flex;flex-wrap:wrap;gap:10px 14px;margin-bottom:10px;font-size:12px;color:#ddd;">
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-metrics" ${_o.dailyMetrics?'checked':''} style="accent-color:#7eb8ff;"> Daily metrics</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-trains" ${_o.unusedTrains?'checked':''} style="accent-color:#7eb8ff;"> Unused trains</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-alerts" ${_o.employeeAlerts?'checked':''} style="accent-color:#7eb8ff;"> Employee alerts</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-stars" ${_o.starChange?'checked':''} style="accent-color:#7eb8ff;"> Star changes</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-stock" ${_o.stockAlert?'checked':''} style="accent-color:#7eb8ff;"> Stock alerts</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-auto" ${_o.autoPost!==false?'checked':''} style="accent-color:#7eb8ff;"> Auto-post after 18:00 TCT</label>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;color:#ddd;">
+                      <label for="tcm-d-stock-days" style="color:#aaa;">Stock alert ≤ days</label>
+                      <input type="number" id="tcm-d-stock-days" min="0.5" max="30" step="0.5" value="${Number(_o.stockAlertDays)||3}"
+                          style="width:64px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#ddd;padding:3px 6px;" />
+                  </div>
+                  <div style="font-size:11px;color:#888;margin-bottom:8px;">${last} · ${panelNote}</div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+                      <button class="tcm-btn green" id="tcm-discord-save">Save Discord</button>
+                      <button class="tcm-btn" id="tcm-discord-post">Post / Update Now</button>
+                      <button class="tcm-btn" id="tcm-discord-reset-panel">Reset Panel Msg ID</button>
+                  </div>
+                  <div id="tcm-discord-status" style="font-size:11px;color:#888;min-height:16px;margin-bottom:4px;"></div>`;
+                  })()}
+                  <hr class="tcm-divider">
                   <div class="tcm-section-label">Full Data Backup</div>
                   <div class="tcm-notice" style="font-size:11px;">Exports ALL TCM data — settings, training log, finance history, rotation state, contracts, tax config, and API key. Safe to restore even after deleting and reinstalling the script. Keep the file somewhere safe.</div>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">
@@ -13414,7 +13766,10 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   <hr class="tcm-divider">
                   <button class="tcm-btn" id="tcm-back-btn">← Back</button>
               `;
-  document.getElementById('tcm-key-save').addEventListener('click', () => {
+  document.getElementById('tcm-back-btn')?.addEventListener('click', () => {
+                  this._leaveSettingsPage();
+              });
+              document.getElementById('tcm-key-save').addEventListener('click', () => {
                   const k = document.getElementById('tcm-key-input').value.trim();
 if (k) { Storage.setApiKey(k); document.getElementById('tcm-body').innerHTML = '<div class="tcm-loading"><span class="tcm-spin"></span>Verifying new key...</div>'; App.refresh(); }
               });
@@ -13638,6 +13993,71 @@ document.getElementById('tcm-clear-log').addEventListener('click', () => {
                   if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { btn.textContent = 'Save Selection'; }, 1500); }
               });
               
+              
+              document.getElementById('tcm-discord-save')?.addEventListener('click', () => {
+                  const cfg = Discord.getCfg();
+                  cfg.logWebhook = (document.getElementById('tcm-discord-log-hook')?.value || '').trim();
+                  cfg.panelWebhook = (document.getElementById('tcm-discord-panel-hook')?.value || '').trim();
+                  cfg.weeklyWebhook = (document.getElementById('tcm-discord-weekly-hook')?.value || '').trim();
+                  Discord.saveCfg(cfg);
+                  Discord.saveOpts({
+                      dailyMetrics: !!document.getElementById('tcm-d-opt-metrics')?.checked,
+                      unusedTrains: !!document.getElementById('tcm-d-opt-trains')?.checked,
+                      employeeAlerts: !!document.getElementById('tcm-d-opt-alerts')?.checked,
+                      starChange: !!document.getElementById('tcm-d-opt-stars')?.checked,
+                      stockAlert: !!document.getElementById('tcm-d-opt-stock')?.checked,
+                      autoPost: !!document.getElementById('tcm-d-opt-auto')?.checked,
+                      stockAlertDays: parseFloat(document.getElementById('tcm-d-stock-days')?.value) || 3
+                  });
+                  const st = document.getElementById('tcm-discord-status');
+                  if (st) { st.style.color = '#7eb8ff'; st.textContent = 'Discord settings saved.'; }
+                  const btn = document.getElementById('tcm-discord-save');
+                  if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { btn.textContent = 'Save Discord'; }, 1500); }
+              });
+              document.getElementById('tcm-discord-post')?.addEventListener('click', async () => {
+                  const btn = document.getElementById('tcm-discord-post');
+                  const st = document.getElementById('tcm-discord-status');
+                  // persist fields first
+                  const cfg = Discord.getCfg();
+                  cfg.logWebhook = (document.getElementById('tcm-discord-log-hook')?.value || '').trim();
+                  cfg.panelWebhook = (document.getElementById('tcm-discord-panel-hook')?.value || '').trim();
+                  cfg.weeklyWebhook = (document.getElementById('tcm-discord-weekly-hook')?.value || '').trim();
+                  Discord.saveCfg(cfg);
+                  Discord.saveOpts({
+                      dailyMetrics: !!document.getElementById('tcm-d-opt-metrics')?.checked,
+                      unusedTrains: !!document.getElementById('tcm-d-opt-trains')?.checked,
+                      employeeAlerts: !!document.getElementById('tcm-d-opt-alerts')?.checked,
+                      starChange: !!document.getElementById('tcm-d-opt-stars')?.checked,
+                      stockAlert: !!document.getElementById('tcm-d-opt-stock')?.checked,
+                      autoPost: !!document.getElementById('tcm-d-opt-auto')?.checked,
+                      stockAlertDays: parseFloat(document.getElementById('tcm-d-stock-days')?.value) || 3
+                  });
+                  if (btn) { btn.disabled = true; btn.textContent = '…posting'; }
+                  if (st) { st.style.color = '#aaa'; st.textContent = 'Posting to Discord…'; }
+                  try {
+                      if (!UI.state) throw new Error('Load company data first (open TCM on a company page and refresh).');
+                      const res = await Discord.runReports(UI.state, true);
+                      if (st) {
+                          st.style.color = '#7eb8ff';
+                          st.textContent = 'Posted' +
+                              (res.results?.log ? ' · log' : '') +
+                              (res.results?.panel ? ' · panel' : '') +
+                              (res.errors?.length ? (' · warnings: ' + res.errors.join('; ')) : '');
+                      }
+                      if (btn) { btn.textContent = '✓ Done'; }
+                  } catch (e) {
+                      if (st) { st.style.color = '#f88'; st.textContent = 'Failed: ' + (e.message || e); }
+                      if (btn) { btn.textContent = '✗ Failed'; }
+                  } finally {
+                      setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = 'Post / Update Now'; } }, 2000);
+                  }
+              });
+              document.getElementById('tcm-discord-reset-panel')?.addEventListener('click', () => {
+                  Discord.saveMeta({ panelMessageId: null });
+                  const st = document.getElementById('tcm-discord-status');
+                  if (st) { st.style.color = '#aaa'; st.textContent = 'Panel message id cleared — next post creates a new panel message.'; }
+              });
+
               document.getElementById('tcm-jsonbin-save')?.addEventListener('click', () => {
                   const cfg = JsonBinSync.getCfg();
                   cfg.binId = (document.getElementById('tcm-jsonbin-id')?.value || '').trim();
@@ -16519,6 +16939,9 @@ console.log('[TCM DEBUG] myTornId resolved to:', JSON.stringify(myTornId));
                               }
                           }
                       }
+
+                      
+                  try { Discord.maybeAutoPost(state); } catch (_de) { console.warn('[TCM] Discord auto', _de); }
 
                       const _gsCfg = GoogleSync.getCfg();
                       const _gsUrl = _gsCfg.webAppUrl || _gsCfg.url;
