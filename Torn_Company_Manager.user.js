@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.6.5-alpha
+// @version      10.6.6-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -11834,21 +11834,25 @@ const posEntries = Object.entries(posBuckets).sort(([,a],[,b]) => b - a);
 
               if (_posRows.length) {
                   html += `<div class="tcm-section-label" style="margin-top:12px;">By position (working stats)</div>
-                  <div style="overflow-x:auto;margin-bottom:12px;"><table class="tcm-emp" style="width:100%;font-size:12px;border-collapse:collapse;">
-                  <thead><tr>
-                      <th style="text-align:left;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Position</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">n</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Avg WS</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Min</th>
-                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Max</th>
-                  </tr></thead><tbody>`;
+                  <div style="overflow-x:auto;margin-bottom:12px;">
+                  <table style="width:100%;font-size:12px;border-collapse:collapse;table-layout:auto;display:table;">
+                  <thead>
+                  <tr>
+                      <th style="display:table-cell;text-align:left;padding:5px 6px;border-bottom:1px solid #444;background:#2a2a2a;color:#ccc;font-weight:600;">Position</th>
+                      <th style="display:table-cell;text-align:right;padding:5px 6px;border-bottom:1px solid #444;background:#2a2a2a;color:#ccc;font-weight:600;">n</th>
+                      <th style="display:table-cell;text-align:right;padding:5px 6px;border-bottom:1px solid #444;background:#2a2a2a;color:#ccc;font-weight:600;">Avg WS</th>
+                      <th style="display:table-cell;text-align:right;padding:5px 6px;border-bottom:1px solid #444;background:#2a2a2a;color:#ccc;font-weight:600;">Min</th>
+                      <th style="display:table-cell;text-align:right;padding:5px 6px;border-bottom:1px solid #444;background:#2a2a2a;color:#ccc;font-weight:600;">Max</th>
+                  </tr>
+                  </thead>
+                  <tbody>`;
                   for (const r of _posRows) {
                       html += `<tr>
-                          <td style="padding:4px 6px;border-bottom:1px solid #333;color:#c8c8c8;">${r.pos}</td>
-                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#aaa;">${r.count}</td>
-                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#7eb8ff;font-weight:700;">${r.avg.toLocaleString()}</td>
-                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.min.toLocaleString()}</td>
-                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.max.toLocaleString()}</td>
+                          <td style="display:table-cell;padding:4px 6px;border-bottom:1px solid #333;color:#c8c8c8;">${r.pos}</td>
+                          <td style="display:table-cell;padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#aaa;">${r.count}</td>
+                          <td style="display:table-cell;padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#7eb8ff;font-weight:700;">${r.avg.toLocaleString()}</td>
+                          <td style="display:table-cell;padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.min.toLocaleString()}</td>
+                          <td style="display:table-cell;padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.max.toLocaleString()}</td>
                       </tr>`;
                   }
                   html += `</tbody></table></div>`;
