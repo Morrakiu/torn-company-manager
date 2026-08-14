@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Morrakiu's Company Manager
 // @namespace    https://github.com/Morrakiu/torn-company-manager
-// @version      3.26.0
-// @description  Stock tab + Discord stock-day alerts. Training contracts, plan, calculator. Peer role-mix advisor. PDA, JSONBin, Sheets.
+// @version      3.27.0
+// @description  Full finance P&L (income, salaries, ad, est. stock COGS, training). Stock tab, contracts, peers. PDA, JSONBin, Sheets.
 // @author       Morrakiu
 // @match        https://www.torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=companies*
@@ -303,6 +303,29 @@
     const METRICS_KEEP_WEEKS = 4;
     // Stock smart-balance target: equalize run-out around this many days
     const STOCK_TARGET_DAYS = 7;
+    /**
+     * Approximate wholesale unit costs by company type (for est. daily stock COGS).
+     * Same reference table used by Solenya TCM — estimates only; not from API.
+     */
+    const STOCK_WHOLESALE = {
+        'Flower Shop': { 'Card': 9, 'Vase': 25, 'Bouquet': 26, 'Box of Chocolates': 28, 'Luxury Bouquet': 47, 'Hamper': 50 },
+        'Candle Shop': { 'Tealight': 2, 'Dinner Candle': 4, 'Holder': 10, 'Pillar Candle': 12, 'Scented Candle': 19 },
+        'Clothing Store': { 'Sandals': 15, 'Sweat Pants': 15, 'Underwear': 15, 'T-Shirt': 20, 'Shorts': 25, 'Body Warmer': 33, 'Jeans': 46, 'Boots': 72, 'Polo Shirt': 86, 'Chinos': 99, 'Jacket': 140, 'Leather Shoes': 200, 'Tuxedo': 697 },
+        'Furniture Store': { 'Dining Chair': 50, 'Bedside Table': 100, 'Coffee Table': 200, 'Entertainment Unit': 250, 'Dining Table': 400, 'Display Cabinet': 450, 'Bed': 450, 'Sofa': 600 },
+        'Gas Station': { 'Gasoline (Gallon)': 2, 'Diesel (Gallon)': 3 },
+        'Music Store': { 'Ukulele': 121, 'Synthesizer': 280, 'Violin': 389, 'Flute': 499, 'Guitar': 691, 'Drum Kit': 923, 'Saxophone': 1000, 'Trumpet': 1311, 'Clarinet': 1692, 'Piano': 5400 },
+        'Restaurant': { 'Beverage': 1, 'Bottle of Wine': 40 },
+        'Sweet Shop': { 'Marshmallow Selection': 3, 'Boiled Sweet Selection': 4, 'Jelly Selection': 5, 'Caramel Selection': 5, 'Chocolate Selection': 8, 'Liquorice Selection': 11, 'Fudge Selection': 14 },
+        'Toy Shop': { 'Jigsaw': 6, 'Plushie Toy': 12, 'Craft Set': 16, 'Action Figure': 17, 'Board Game': 18, 'Water Pistol': 22, 'Model Kit': 23, 'Doll': 31, 'RC Car': 40, 'RC Helicopter': 50, 'Scooter': 90, 'Bicycle': 112, 'Trampoline': 462, 'Game Console': 545, 'Playhouse': 625 },
+        'Adult Novelties': { 'Blow Up Doll': 4, 'Magazine': 4, 'Lubricant': 6, 'Condoms': 6, 'Whip': 7, 'Handcuffs': 10, 'Kama Sutra Book': 12, 'Vibrator': 19 },
+        'Grocery Store': { 'Fruit': 1, 'Bread': 1, 'Dairy': 1, 'Vegetables': 2, 'Fish': 3, 'Meat': 4 },
+        'Game Shop': { 'Handheld Game': 28, 'PC Game': 46, 'Controller': 55, 'Console Game': 58, 'Handheld': 350, 'Console': 545 },
+        'Zoo': { 'Animal Feed': 1, 'Souvenir': 2 },
+        'Mechanic Shop': { 'Tyre': 30 },
+        'Car Dealership': { 'Compact': 5000, 'Hatchback': 6500, 'Sedan': 9750, 'Coupe': 10500, 'SUV': 12500, 'Sports Car': 29000, 'Luxury Car': 82500 },
+        'Gun Shop': { 'Pistol': 250, 'Hunting Rifle': 330, 'Shotgun': 375, 'Submachine Gun': 510, 'Assault Rifle': 745 },
+        'Lingerie Store': { 'Knickers': 4, 'Stockings': 8, 'Thong': 10, 'Bra': 21, 'Suspenders': 30, 'Corset': 40 }
+    };
     // Training priority mode: 'fair' (tenure share) or 'star' (push EE / stars)
     let trainMode = GM_getValue('tcmTrainMode', 'fair') === 'star' ? 'star' : 'fair';
 
@@ -2465,6 +2488,69 @@
     }
     function totalDailyReservations() {
         return getActiveTrainContracts().reduce((s, c) => s + (c.dailyReservation || 0), 0);
+    }
+
+    /**
+     * Training-contract finance summary for Metrics / Discord.
+     * Income is recognized as trains are logged (+Train), not when prepaid.
+     * Today = trains logged today on active contracts × price (FIFO if multiple contracts per buyer).
+     */
+    function summarizeTrainContractFinance() {
+        const all = loadTrainContracts().map(enrichContract).filter(c => !c.deleted);
+        const active = all.filter(c => c.active);
+        if (!active.length && !all.length) {
+            return {
+                hasContracts: false,
+                activeCount: 0,
+                trainsToday: 0,
+                incomeToday: 0,
+                expectedDaily: 0,
+                earnedLifetime: 0,
+                remainingValue: 0,
+                prepaidTotal: 0,
+                reservedTrains: 0
+            };
+        }
+
+        // Per-buyer trains logged today × that buyer's active contract price (max if several)
+        const buyerPrice = {};
+        active.forEach(c => {
+            const id = String(c.buyerEmpId);
+            const price = Number(c.pricePerTrain) || 0;
+            if (buyerPrice[id] == null || price > buyerPrice[id]) buyerPrice[id] = price;
+        });
+        let trainsToday = 0;
+        let incomeToday = 0;
+        Object.keys(buyerPrice).forEach(id => {
+            const t = Math.max(0, trainsLoggedToday(id) || 0);
+            if (t <= 0) return;
+            trainsToday += t;
+            incomeToday += t * (buyerPrice[id] || 0);
+        });
+
+        let expectedDaily = 0;
+        let reservedTrains = 0;
+        active.forEach(c => {
+            const res = Math.min(Number(c.dailyReservation) || 0, Number(c.remaining) || 0);
+            reservedTrains += res;
+            expectedDaily += res * (Number(c.pricePerTrain) || 0);
+        });
+
+        const earnedLifetime = all.reduce((s, c) => s + (Number(c.cashEarned) || 0), 0);
+        const remainingValue = active.reduce((s, c) => s + (Number(c.cashRemaining) || 0), 0);
+        const prepaidTotal = active.reduce((s, c) => s + (Number(c.prepaidAmount) || 0), 0);
+
+        return {
+            hasContracts: active.length > 0 || earnedLifetime > 0,
+            activeCount: active.length,
+            trainsToday,
+            incomeToday: Math.round(incomeToday),
+            expectedDaily: Math.round(expectedDaily),
+            earnedLifetime: Math.round(earnedLifetime),
+            remainingValue: Math.round(remainingValue),
+            prepaidTotal: Math.round(prepaidTotal),
+            reservedTrains
+        };
     }
     /** Merge remote contracts by id; prefer newer createdAt / non-deleted. */
     function mergeTrainContractsFromRemote(remoteList) {
@@ -4652,23 +4738,28 @@
             if (val == null || val === '') return;
             fields.push({ name: name, value: String(val), inline: !!inline });
         };
-        const payroll = computePayroll(companyRoster(companyData));
-        const daily = numOrNull(p.daily_income);
-        const profit = daily != null ? daily - payroll.total : null;
+        const stockData = stock || (companyData && (companyData.company_stock || companyData.stock)) || {};
+        const m = buildFinanceModel(p, companyRoster(companyData), stockData);
         const dayQ = classifyIncomeDay(p);
 
-        add('Daily income', daily != null ? '$' + Number(daily).toLocaleString() : null, true);
-        add('Weekly income', p.weekly_income != null ? '$' + Number(p.weekly_income).toLocaleString() : null, true);
-        add('Payroll', '$' + payroll.total.toLocaleString(), true);
-        if (profit != null) {
-            add('Profit after wages', '$' + Math.round(profit).toLocaleString(), true);
+        add('Daily income', m.daily != null ? '$' + Number(m.daily).toLocaleString() : null, true);
+        if (m.trainFin.hasContracts) {
+            add('Training (today)', '$' + m.trainToday.toLocaleString() +
+                (m.trainFin.trainsToday ? (' · ' + m.trainFin.trainsToday + ' trains') : ''), true);
         }
+        add('Salaries', '−$' + Math.round(m.salaries).toLocaleString(), true);
+        if (m.adBudget != null) add('Ad budget', '−$' + Math.round(m.ad).toLocaleString(), true);
+        if (m.stockCost > 0) add('Est. stock cost', '−$' + Math.round(m.stockCost).toLocaleString(), true);
+        if (m.netCombined != null) {
+            add('Daily net', '$' + Math.round(m.netCombined).toLocaleString(), true);
+        }
+        add('Weekly income', m.weekly != null ? '$' + Number(m.weekly).toLocaleString() : null, true);
+        if (m.estWeekly != null) add('Est. weekly', '$' + Math.round(m.estWeekly).toLocaleString(), true);
         if (dayQ) add('Day quality', dayQ.label, true);
         add('Bank', (p.company_bank != null || p.bank != null) ? '$' + Number(p.company_bank || p.bank || 0).toLocaleString() : null, true);
         add('Popularity', p.popularity != null ? p.popularity + '%' : null, true);
         add('Efficiency', p.efficiency != null ? p.efficiency + '%' : (p.company_efficiency != null ? p.company_efficiency + '%' : null), true);
         add('Work environment', p.environment != null ? p.environment : (p.working_stats != null ? p.working_stats : (p.company_environment != null ? p.company_environment : null)), true);
-        add('Ad budget', p.advertising_budget != null ? '$' + Number(p.advertising_budget).toLocaleString() : null, true);
         add('Rating', p.rating != null ? '★' + p.rating : null, true);
         add('Employees', (p.employees_hired != null ? p.employees_hired : '?') + ' / ' + (p.employees_capacity != null ? p.employees_capacity : '?'), true);
 
@@ -5279,17 +5370,20 @@
     function snapshotFinanceToday() {
         if (!companyData) return;
         const p = companyData.company || companyData.profile || {};
-        const payroll = computePayroll(companyRoster(companyData) || companyData.company_employees || {});
-        const daily = Number(p.daily_income) || 0;
+        const stock = companyData.company_stock || companyData.stock || {};
+        const employees = companyRoster(companyData) || companyData.company_employees || {};
+        const m = buildFinanceModel(p, employees, stock);
         const tct = getTCTParts();
         const hist = loadJson('tcmFinanceHistory', []);
         const entry = {
             date: tct.dateStr,
-            daily,
-            salaries: payroll.total || 0,
-            adBudget: Number(p.advertising_budget) || 0,
-            dailyStockCost: 0,
-            netProfit: daily - (payroll.total || 0),
+            daily: m.daily != null ? m.daily : 0,
+            salaries: m.salaries || 0,
+            adBudget: m.ad || 0,
+            dailyStockCost: m.stockCost || 0,
+            trainIncome: m.trainToday || 0,
+            netProfit: m.netCombined != null ? Math.round(m.netCombined)
+                : (m.netCompany != null ? Math.round(m.netCompany) : 0),
             source: 'api'
         };
         const idx = hist.findIndex(r => r && r.date === entry.date);
@@ -5742,45 +5836,232 @@
         return { total: total, count: list.length };
     }
 
-    function renderFinanceStripHtml(p, employees) {
+    /** Lookup wholesale unit cost for a stock item name under a company type. */
+    function wholesaleUnitCost(typeName, itemName) {
+        const prices = STOCK_WHOLESALE[typeName] || {};
+        if (prices[itemName] != null) return Number(prices[itemName]) || 0;
+        const want = safeStr(itemName).toLowerCase();
+        const hit = Object.keys(prices).find(k => k.toLowerCase() === want);
+        return hit ? (Number(prices[hit]) || 0) : 0;
+    }
+
+    /**
+     * Est. daily stock COGS = Σ (sold/day × wholesale unit cost).
+     * Wholesale table is approximate (community reference); 0 when unknown.
+     */
+    function estimateDailyStockCost(typeName, stock) {
+        const prices = STOCK_WHOLESALE[typeName] || {};
+        if (!prices || !Object.keys(prices).length) {
+            return { total: 0, lines: [], known: false };
+        }
+        const lines = [];
+        let total = 0;
+        Object.values(stock || {}).forEach(s => {
+            const name = s.name || s.item || '';
+            const sold = s.sold_amount != null ? Number(s.sold_amount)
+                : (s.sold != null ? Number(s.sold)
+                    : (s.sold_daily != null ? Number(s.sold_daily)
+                        : (s.sales != null ? Number(s.sales) : 0)));
+            const costPer = wholesaleUnitCost(typeName, name);
+            if (!(sold > 0) || !(costPer > 0)) return;
+            const line = sold * costPer;
+            total += line;
+            lines.push({ name, sold, costPer, cost: line });
+        });
+        return { total: Math.round(total), lines, known: true };
+    }
+
+    /**
+     * Full daily finance model (Solenya-style P&L + training contracts).
+     * netCompany = daily − salaries − ad − estStock
+     * netCombined = netCompany + trainingIncomeToday
+     */
+    function buildFinanceModel(p, employees, stock) {
         const payroll = computePayroll(employees);
         const daily = numOrNull(p.daily_income);
         const weekly = numOrNull(p.weekly_income);
-        const profit = daily != null ? daily - payroll.total : null;
-        const margin = (daily != null && daily > 0)
-            ? Math.round(((daily - payroll.total) / daily) * 1000) / 10
+        const adBudget = numOrNull(p.advertising_budget);
+        const bank = numOrNull(p.company_bank != null ? p.company_bank : p.bank);
+        const typeName = resolveCompanyTypeName(
+            (p && (p.company_type || p.type)) || '',
+            p
+        ) || safeStr(p && p.company_type) || '';
+        const stockBag = stock || (companyData && (companyData.company_stock || companyData.stock)) || {};
+        const stockEst = estimateDailyStockCost(typeName, stockBag);
+        const trainFin = summarizeTrainContractFinance();
+        const trainToday = trainFin.hasContracts ? (trainFin.incomeToday || 0) : 0;
+        const salaries = payroll.total || 0;
+        const ad = adBudget != null ? adBudget : 0;
+        const stockCost = stockEst.total || 0;
+        const companyDaily = daily != null ? daily : 0;
+        const expenses = salaries + ad + stockCost;
+        const netCompany = daily != null ? companyDaily - expenses : null;
+        const grossCombined = daily != null ? companyDaily + trainToday : (trainToday > 0 ? trainToday : null);
+        const netCombined = grossCombined != null ? grossCombined - expenses : null;
+        const margin = (netCombined != null && grossCombined > 0)
+            ? Math.round((netCombined / grossCombined) * 1000) / 10
             : null;
+        const estWeekly = daily != null ? daily * 7 : null;
+        const adPct = (daily != null && daily > 0 && ad > 0)
+            ? Math.round((ad / daily) * 1000) / 10
+            : null;
+
+        return {
+            payroll,
+            daily,
+            weekly,
+            adBudget,
+            bank,
+            typeName,
+            stockEst,
+            trainFin,
+            trainToday,
+            salaries,
+            ad,
+            stockCost,
+            expenses,
+            netCompany,
+            grossCombined,
+            netCombined,
+            margin,
+            estWeekly,
+            adPct
+        };
+    }
+
+    function financeHistoryAverages(days) {
+        const hist = loadJson('tcmFinanceHistory', []);
+        if (!Array.isArray(hist) || !hist.length) return null;
+        const n = Math.max(1, days || 7);
+        const slice = hist.slice(-n);
+        if (!slice.length) return null;
+        const sum = (k) => slice.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+        const c = slice.length;
+        return {
+            days: c,
+            avgDaily: Math.round(sum('daily') / c),
+            avgSalaries: Math.round(sum('salaries') / c),
+            avgAd: Math.round(sum('adBudget') / c),
+            avgStock: Math.round(sum('dailyStockCost') / c),
+            avgNet: Math.round(sum('netProfit') / c),
+            avgTrain: Math.round(sum('trainIncome') / c)
+        };
+    }
+
+    function renderFinanceStripHtml(p, employees) {
+        const stock = (companyData && (companyData.company_stock || companyData.stock)) || {};
+        const m = buildFinanceModel(p, employees, stock);
         const dayQ = classifyIncomeDay(p);
+        const avg7 = financeHistoryAverages(7);
+
+        const red = (v) => `<span class="tcm-bad">−$${Math.round(v).toLocaleString()}</span>`;
+        const money = (v, cls) => `<span class="${cls || ''}">$${Math.round(v).toLocaleString()}</span>`;
 
         let html = `<div class="tcm-section"><h4>Finance</h4>`;
-        html += `<div class="tcm-row"><span class="tcm-label">Daily payroll</span>
-            <span class="tcm-value">$${payroll.total.toLocaleString()}
-            <span style="color:#888;font-weight:normal">(${payroll.count} staff)</span></span></div>`;
-        if (daily != null) {
+
+        // Revenue
+        if (m.daily != null) {
             html += `<div class="tcm-row"><span class="tcm-label">Daily income</span>
-                <span class="tcm-value">$${Number(daily).toLocaleString()}</span></div>`;
+                <span class="tcm-value">${money(m.daily)}</span></div>`;
         }
-        if (profit != null) {
-            const cls = profit >= 0 ? 'tcm-good' : 'tcm-bad';
-            html += `<div class="tcm-row"><span class="tcm-label">Profit after wages</span>
-                <span class="tcm-value ${cls}">$${Math.round(profit).toLocaleString()}
-                ${margin != null ? ` <span style="color:#888;font-weight:normal">(${margin}% margin)</span>` : ''}</span></div>`;
+        if (m.trainFin.hasContracts) {
+            html += `<div class="tcm-row"><span class="tcm-label">Training income (today)</span>
+                <span class="tcm-value ${m.trainToday > 0 ? 'tcm-good' : ''}">$${m.trainToday.toLocaleString()}
+                <span style="color:#888;font-weight:normal">(${m.trainFin.trainsToday} train${m.trainFin.trainsToday === 1 ? '' : 's'})</span></span></div>`;
+            if (m.trainFin.expectedDaily > 0) {
+                html += `<div class="tcm-row"><span class="tcm-label">Training expected / day</span>
+                    <span class="tcm-value">$${m.trainFin.expectedDaily.toLocaleString()}
+                    <span style="color:#888;font-weight:normal">(${m.trainFin.reservedTrains} reserved)</span></span></div>`;
+            }
         }
-        if (weekly != null) {
-            html += `<div class="tcm-row"><span class="tcm-label">Weekly income</span>
-                <span class="tcm-value">$${Number(weekly).toLocaleString()}</span></div>`;
+        if (m.grossCombined != null && m.trainFin.hasContracts && m.daily != null) {
+            html += `<div class="tcm-row"><span class="tcm-label">Gross (income + training)</span>
+                <span class="tcm-value">${money(m.grossCombined)}</span></div>`;
         }
+
+        // Expenses (Solenya-style)
+        html += `<div class="tcm-row"><span class="tcm-label">Salaries</span>
+            <span class="tcm-value">${red(m.salaries)}
+            <span style="color:#888;font-weight:normal">(${m.payroll.count} staff)</span></span></div>`;
+        if (m.adBudget != null) {
+            html += `<div class="tcm-row"><span class="tcm-label">Ad budget</span>
+                <span class="tcm-value">${red(m.ad)}
+                ${m.adPct != null ? `<span style="color:#888;font-weight:normal">(${m.adPct}% of income)</span>` : ''}</span></div>`;
+        }
+        if (m.stockCost > 0) {
+            html += `<div class="tcm-row"><span class="tcm-label">Est. stock cost</span>
+                <span class="tcm-value" title="sold/day × wholesale unit cost">${red(m.stockCost)}
+                <span style="color:#888;font-weight:normal">est.</span></span></div>`;
+        } else if (m.stockEst.known === false && Object.keys(stock || {}).length) {
+            html += `<div class="tcm-row"><span class="tcm-label">Est. stock cost</span>
+                <span class="tcm-value" style="color:#888">— <span style="font-weight:normal">(no wholesale table for this type)</span></span></div>`;
+        }
+
+        // Net
+        if (m.netCombined != null) {
+            const cls = m.netCombined >= 0 ? 'tcm-good' : 'tcm-bad';
+            html += `<div class="tcm-row"><span class="tcm-label"><strong>Daily net</strong></span>
+                <span class="tcm-value ${cls}"><strong>$${Math.round(m.netCombined).toLocaleString()}</strong>
+                ${m.margin != null ? ` <span style="color:#888;font-weight:normal">(${m.margin}% margin)</span>` : ''}</span></div>`;
+            if (m.trainToday > 0 && m.netCompany != null) {
+                html += `<div class="tcm-row"><span class="tcm-label">Net (company only)</span>
+                    <span class="tcm-value ${m.netCompany >= 0 ? 'tcm-good' : 'tcm-bad'}">$${Math.round(m.netCompany).toLocaleString()}</span></div>`;
+            }
+        }
+
+        // Weekly / bank
+        if (m.weekly != null) {
+            html += `<div class="tcm-row"><span class="tcm-label">Weekly income (API)</span>
+                <span class="tcm-value">${money(m.weekly)}</span></div>`;
+        }
+        if (m.estWeekly != null) {
+            html += `<div class="tcm-row"><span class="tcm-label">Est. weekly income</span>
+                <span class="tcm-value" title="Daily income × 7">${money(m.estWeekly)}
+                <span style="color:#888;font-weight:normal">est.</span></span></div>`;
+        }
+        if (m.bank != null) {
+            html += `<div class="tcm-row"><span class="tcm-label">Company bank</span>
+                <span class="tcm-value">${money(m.bank)}</span></div>`;
+        }
+
+        if (m.trainFin.hasContracts) {
+            html += `<div class="tcm-row"><span class="tcm-label">Training earned (all)</span>
+                <span class="tcm-value">$${m.trainFin.earnedLifetime.toLocaleString()}
+                <span style="color:#888;font-weight:normal"> · left $${m.trainFin.remainingValue.toLocaleString()}</span></span></div>`;
+            if (m.trainFin.prepaidTotal > 0) {
+                html += `<div class="tcm-row"><span class="tcm-label">Training prepaid</span>
+                    <span class="tcm-value">$${m.trainFin.prepaidTotal.toLocaleString()}
+                    <span style="color:#888;font-weight:normal">(collected — not in daily net)</span></span></div>`;
+            }
+        }
+
         if (dayQ) {
             const cls = dayQ.level === 'strong' ? 'tcm-good'
                 : dayQ.level === 'weak' ? 'tcm-bad' : 'tcm-warn';
             html += `<div class="tcm-row"><span class="tcm-label">Today vs avg day</span>
-                <span class="tcm-value ${cls}">${dayQ.label}</span></div>`;
+                <span class="tcm-value ${cls}">${dayQ.label}
+                <span style="color:#888;font-weight:normal">(company income)</span></span></div>`;
         }
-        const salWarn = salaryRatioAlert(daily, payroll.total);
+
+        if (avg7 && avg7.days >= 2) {
+            html += `<div class="tcm-row"><span class="tcm-label">Avg net (${avg7.days}d hist)</span>
+                <span class="tcm-value ${avg7.avgNet >= 0 ? 'tcm-good' : 'tcm-bad'}">$${avg7.avgNet.toLocaleString()}
+                <span style="color:#888;font-weight:normal"> · income $${avg7.avgDaily.toLocaleString()}</span></span></div>`;
+        }
+
+        const salWarn = salaryRatioAlert(m.grossCombined != null ? m.grossCombined : m.daily, m.salaries);
         if (salWarn) {
             html += `<div class="tcm-reco tcm-warn">${salWarn.msg}</div>`;
         }
-        html += `<div class="tcm-peer-note">Payroll sums employee wage/salary fields from the API. Profit = daily income − payroll. Salary-ratio warn at ≥${Math.round(SALARY_RATIO_WARN*100)}%.</div></div>`;
+        if (m.adPct != null && m.adPct >= 50) {
+            html += `<div class="tcm-reco tcm-warn">Ad budget is ${m.adPct}% of daily income — check whether spend is returning proportional revenue.</div>`;
+        }
+
+        html += `<div class="tcm-peer-note">
+            <strong>Daily net</strong> = income${m.trainFin.hasContracts ? ' + training (logged today)' : ''} − salaries − ad budget − est. stock cost.
+            Stock cost ≈ sold/day × wholesale reference prices (not API). Training prepaid is not double-counted.
+            Salary-ratio warn ≥${Math.round(SALARY_RATIO_WARN * 100)}%.
+        </div></div>`;
         return html;
     }
 
