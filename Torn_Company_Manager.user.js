@@ -4,6 +4,7 @@
 // @version      10.6.3-unlicensed
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations.
+// @author       Morrakiu
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @match        https://tornstats.com/*
@@ -21,6 +22,8 @@
 // @connect      greasyfork.org
 // @run-at       document-idle
 // @license      MIT
+// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
+// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
 // ==/UserScript==
 
   (function () {
