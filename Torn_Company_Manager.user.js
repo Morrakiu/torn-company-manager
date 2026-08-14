@@ -1953,13 +1953,14 @@ function runCapture() {
               return { ok: true, results, errors };
           },
 
-          /** Auto-post once per TCT day after 18:00 if enabled */
+          /** Auto-post once per TCT day at/after 18:15 if enabled */
           maybeAutoPost(state) {
               try {
                   const opts = this.getOpts();
                   if (!opts.autoPost || !this.hasAnyWebhook() || !this.anyReportEnabled()) return;
                   const tct = this.getTCTParts();
-                  if (tct.hour < 18) return;
+                  // 18:15 TCT gate
+                  if (tct.hour < 18 || (tct.hour === 18 && tct.min < 15)) return;
                   const meta = this.getMeta();
                   if (meta.lastPostDateTCT === tct.dateStr) return;
                   this.runReports(state, false).catch(e => console.warn('[TCM] Discord auto-post failed:', e));
@@ -5153,7 +5154,11 @@ training: [
                   else { wrap.classList.remove('pinned'); wrap.querySelector('#tcm-btn-pin').classList.remove('active'); }
               });
               wrap.querySelector('#tcm-btn-settings').addEventListener('click', () => {
-                  this._openSettingsPage();
+                  if (this._currentTab === 'settings' || this._currentCat === 'settings') {
+                      this._leaveSettingsPage();
+                  } else {
+                      this._openSettingsPage();
+                  }
               });
 
 launcher.addEventListener('click', () => {
@@ -13386,10 +13391,14 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
 
 
           _openSettingsPage() {
-              this._settingsReturnTab = (this._currentTab && this._currentTab !== 'settings')
-                  ? this._currentTab
-                  : (this._settingsReturnTab || 'overview');
-              this._settingsReturnCat = this._currentCat || 'management';
+              // Remember last real tab/category only when entering settings from elsewhere
+              if (this._currentTab !== 'settings' && this._currentCat !== 'settings') {
+                  this._settingsReturnTab = this._currentTab || 'overview';
+                  this._settingsReturnCat = this._currentCat || 'management';
+              } else {
+                  this._settingsReturnTab = this._settingsReturnTab || 'overview';
+                  this._settingsReturnCat = this._settingsReturnCat || 'management';
+              }
               this._currentTab = 'settings';
               this._currentCat = 'settings';
               // Clear category + sub-tab highlights so Settings is a dedicated page
@@ -13405,13 +13414,13 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
               const tabsBar = document.getElementById('tcm-tabs');
               if (tabsBar) tabsBar.style.display = '';
               const cat = this._settingsReturnCat || 'management';
-              const tab = this._settingsReturnTab || 'overview';
-              this._currentCat = cat;
+              let tab = this._settingsReturnTab || 'overview';
+              if (!tab || tab === 'settings') tab = 'overview';
+              this._currentCat = cat === 'settings' ? 'management' : cat;
               this._currentTab = tab;
-              document.querySelectorAll('.tcm-cat').forEach(c => c.classList.toggle('active', c.dataset.cat === cat));
-              if (typeof this._renderSubTabs === 'function') this._renderSubTabs(cat, tab);
-              if (this.state) this._renderTab(tab);
-              else this._renderTab(tab);
+              document.querySelectorAll('.tcm-cat').forEach(c => c.classList.toggle('active', c.dataset.cat === this._currentCat));
+              if (typeof this._renderSubTabs === 'function') this._renderSubTabs(this._currentCat, tab);
+              this._renderTab(tab);
           },
 
           _renderSettings() {
@@ -13687,7 +13696,7 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   <div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">
                       Optional Discord webhooks. <strong>Permanent log</strong> appends a new message each post.
                       <strong>Daily data panel</strong> edits one message in place (live panel).
-                      Auto-post runs once per day after <strong>18:00 TCT</strong> when enabled and company data is loaded.
+                      Auto-post runs once per day at/after <strong>18:15 TCT</strong> when enabled and company data is loaded.
                   </div>
                   ${(() => {
                       const _dc = Discord.getCfg();
@@ -13720,7 +13729,7 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                       <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-alerts" ${_o.employeeAlerts?'checked':''} style="accent-color:#7eb8ff;"> Employee alerts</label>
                       <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-stars" ${_o.starChange?'checked':''} style="accent-color:#7eb8ff;"> Star changes</label>
                       <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-stock" ${_o.stockAlert?'checked':''} style="accent-color:#7eb8ff;"> Stock alerts</label>
-                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-auto" ${_o.autoPost!==false?'checked':''} style="accent-color:#7eb8ff;"> Auto-post after 18:00 TCT</label>
+                      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="tcm-d-opt-auto" ${_o.autoPost!==false?'checked':''} style="accent-color:#7eb8ff;"> Auto-post after 18:15 TCT</label>
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;color:#ddd;">
                       <label for="tcm-d-stock-days" style="color:#aaa;">Stock alert ≤ days</label>
