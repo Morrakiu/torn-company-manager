@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.6.4-alpha
+// @version      10.6.5-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -1045,11 +1045,26 @@ getTodayTrained() {
       const all = this.get('benchmark_cache_v2', {});
       if (category !== undefined) {
           const key = category + '_' + (sameSize ? '1' : '0');
-          const cache = all[key] || all[category] || null;
+          const altKey = category + '_' + (sameSize ? '0' : '1');
+          let cache = all[key] || all[category] || null;
+          // Fallback: other sameSize variant for this category (still useful for Employee Stats)
+          if (!cache && all[altKey]) cache = all[altKey];
           if (!cache) return null;
 
+          const tryRoster = (k) => {
+              const r = this.get('bench_rosters_' + k, {});
+              return r && typeof r === 'object' && Object.keys(r).length ? r : null;
+          };
           if (!cache.companyData || !Object.keys(cache.companyData).length) {
-              cache.companyData = this.get('bench_rosters_' + key, {});
+              cache.companyData = tryRoster(key) || tryRoster(altKey) || tryRoster(category) || {};
+          }
+          // Ensure companies map uses string keys for roster lookups
+          if (cache.companies && typeof cache.companies === 'object') {
+              const norm = {};
+              for (const [cid, meta] of Object.entries(cache.companies)) {
+                  norm[String(cid)] = meta;
+              }
+              cache.companies = norm;
           }
           console.log(`[TCM] getBenchmarkCache: key="${key}" companies=${Object.keys(cache.companies||{}).length} rosters=${Object.keys(cache.companyData||{}).length} age=${Math.round((Date.now()-(cache.ts||0))/60000)}m`);
           return cache;
@@ -11702,47 +11717,85 @@ const posEntries = Object.entries(posBuckets).sort(([,a],[,b]) => b - a);
           },
 
           _tabBenchmarkStats(state) {
-              const { profile, typeName, typeInt } = state;
+              try {
+              const { profile, typeName, typeInt } = state || {};
               if (!typeName || !typeInt) return '<div class="tcm-notice">Company data not loaded. Refresh first.</div>';
-              const benchSizeFilter = Storage.getSettings().benchSameSize;
+              const benchSizeFilter = !!Storage.getSettings().benchSameSize;
               const myStars = parseInt(profile?.rating || 0) || 0;
               let savedCat = App._benchSelectedCat || Storage.getSettings().benchSelectedCat || 'same';
               if (myStars >= 10 && savedCat === 'above') savedCat = 'same';
+              App._benchSelectedCat = savedCat;
+
               const cache = Storage.getBenchmarkCache(savedCat, benchSizeFilter);
               const _resetTs = (() => {
                   const _n = new Date();
                   const _t = new Date(Date.UTC(_n.getUTCFullYear(), _n.getUTCMonth(), _n.getUTCDate(), 18, 15, 0));
                   return _n.getTime() < _t.getTime() ? _t.getTime() - 86400000 : _t.getTime();
               })();
-              const cacheValid = cache && cache.typeInt === typeInt && cache.sameSize === benchSizeFilter && (cache.ts || 0) > _resetTs;
-              if (!cacheValid) {
-                  return `<div class="tcm-notice" style="border-color:#374151;color:#9ca3af;">No benchmark data loaded yet. Go to the Overview sub-tab and click "Load Benchmark" first.</div>`;
+
+              // Soft validity: prefer matching typeInt; allow showing rosters even if sameSize flag drifted
+              const hasRosters = !!(cache && cache.companyData && Object.keys(cache.companyData).length);
+              const typeOk = !!(cache && (cache.typeInt == null || cache.typeInt === typeInt));
+              const freshOk = !!(cache && (cache.ts || 0) > _resetTs);
+              if (!cache || !typeOk) {
+                  return `<div class="tcm-notice" style="border-color:#444;color:#aaa;">No benchmark data loaded yet. Go to the <strong>Overview</strong> sub-tab and click <strong>Load Benchmark</strong> first.</div>`;
               }
+              if (!hasRosters) {
+                  return `<div class="tcm-notice">No employee roster data in this cache. Reload benchmark on the Overview sub-tab (rosters are required for Employee Stats).</div>`;
+              }
+              if (!freshOk) {
+                  // Still show data, but warn — don't blank the whole tab after daily reset boundary
+              }
+
               const compData = cache.companyData || {};
-              if (!Object.keys(compData).length) {
-                  return `<div class="tcm-notice">No employee roster data in this cache. Reload benchmark on the Overview sub-tab.</div>`;
-              }
+              const companies = cache.companies || {};
+
+              // Normalize working-stats from several shapes (HOF object, plain number, effectiveness)
+              const readWs = (e) => {
+                  if (!e || typeof e !== 'object') return null;
+                  if (typeof e.workingStats === 'number' && e.workingStats > 0) return e.workingStats;
+                  if (e.workingStats && typeof e.workingStats.value === 'number' && e.workingStats.value > 0) return e.workingStats.value;
+                  if (typeof e.working_stats === 'number' && e.working_stats > 0) return e.working_stats;
+                  if (e.effectiveness && typeof e.effectiveness.working_stats === 'number' && e.effectiveness.working_stats > 0) {
+                      return e.effectiveness.working_stats;
+                  }
+                  return null;
+              };
 
               const _allEmps = [];
               for (const [_coId, _empsObj] of Object.entries(compData)) {
-                  const _coMeta = (cache.companies || {})[_coId] || {};
-                  for (const [_eid, _e] of Object.entries(_empsObj || {})) {
+                  if (!_empsObj || typeof _empsObj !== 'object') continue;
+                  const _coMeta = companies[String(_coId)] || companies[_coId] || {};
+                  for (const [_eid, _e] of Object.entries(_empsObj)) {
+                      if (!_e || typeof _e !== 'object') continue;
                       _allEmps.push({
-                          id: _eid, name: _e.name || `#${_eid}`, position: _e.position || '—',
-                          company: _coMeta.name || 'Unknown',
-                          ws: (typeof _e.workingStats?.value === 'number' && _e.workingStats.value > 0) ? _e.workingStats.value : null
+                          id: String(_eid),
+                          name: _e.name || ('#' + _eid),
+                          position: _e.position || '—',
+                          company: _coMeta.name || ('Company #' + _coId),
+                          ws: readWs(_e)
                       });
                   }
               }
+
+              if (!_allEmps.length) {
+                  return `<div class="tcm-notice">Roster cache is present but empty. Reload benchmark on the Overview sub-tab.</div>`;
+              }
+
               const _wsEmps = _allEmps.filter(e => e.ws !== null);
               const _wsAvg  = _wsEmps.length ? Math.round(_wsEmps.reduce((a, e) => a + e.ws, 0) / _wsEmps.length) : null;
 
               const _byPos = {};
-              for (const e of _wsEmps) (_byPos[e.position] = _byPos[e.position] || []).push(e.ws);
+              for (const e of _wsEmps) {
+                  if (!_byPos[e.position]) _byPos[e.position] = [];
+                  _byPos[e.position].push(e.ws);
+              }
               const _posRows = Object.entries(_byPos).map(([pos, vals]) => ({
-                  pos, count: vals.length,
+                  pos,
+                  count: vals.length,
                   avg: Math.round(vals.reduce((a, b) => a + b, 0) / vals.length),
-                  max: Math.max(...vals), min: Math.min(...vals)
+                  max: Math.max(...vals),
+                  min: Math.min(...vals)
               })).sort((a, b) => b.avg - a.avg);
 
               const s       = Storage.getSettings();
@@ -11750,46 +11803,61 @@ const posEntries = Object.entries(posBuckets).sort(([,a],[,b]) => b - a);
               const sortDir = s.benchStatsDir  || 'desc';
               const _sorted = [..._allEmps].sort((a, b) => {
                   let av, bv;
-                  if (sortBy === 'ws')            { av = a.ws ?? -1; bv = b.ws ?? -1; }
-                  else if (sortBy === 'company')  { av = a.company.toLowerCase(); bv = b.company.toLowerCase(); }
-                  else if (sortBy === 'position') { av = a.position.toLowerCase(); bv = b.position.toLowerCase(); }
-                  else                            { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+                  if (sortBy === 'ws') {
+                      av = a.ws != null ? a.ws : -1;
+                      bv = b.ws != null ? b.ws : -1;
+                  } else if (sortBy === 'company') {
+                      av = String(a.company || '').toLowerCase();
+                      bv = String(b.company || '').toLowerCase();
+                  } else if (sortBy === 'position') {
+                      av = String(a.position || '').toLowerCase();
+                      bv = String(b.position || '').toLowerCase();
+                  } else {
+                      av = String(a.name || '').toLowerCase();
+                      bv = String(b.name || '').toLowerCase();
+                  }
                   const cmp = av < bv ? -1 : av > bv ? 1 : 0;
                   return sortDir === 'asc' ? cmp : -cmp;
               });
 
               let html = `<div class="tcm-section-label">Employee Stats — ${Object.keys(compData).length} companies · ${_allEmps.length} employees${_wsEmps.length ? ` · ${_wsEmps.length} with working stats` : ''}</div>`;
+              if (!freshOk) {
+                  html += `<div class="tcm-notice" style="font-size:11px;color:#fc6;">Cache is from before today's 18:15 TCT reset — figures may be stale. Reload on Overview when convenient.</div>`;
+              }
               if (_wsAvg !== null) {
-                  html += `<div class="tcm-notice" style="font-size:11px;">Avg working stats across all fetched employees: <strong style="color:#7eb8ff;">${_wsAvg.toLocaleString()}</strong></div>`;
+                  html += `<div class="tcm-notice" style="font-size:11px;">Avg working stats across fetched employees: <strong style="color:#7eb8ff;">${_wsAvg.toLocaleString()}</strong></div>`;
               } else {
-                  html += `<div class="tcm-notice" style="margin-top:4px;">${Storage.getSettings().benchFetchWorkingStats ? 'No working stats came back for this cache — reload from the Overview sub-tab.' : 'Working stats weren\'t fetched for this cache. Enable "Fetch working stats" on the Overview sub-tab, then reload.'}</div>`;
+                  html += `<div class="tcm-notice" style="margin-top:4px;">${Storage.getSettings().benchFetchWorkingStats
+                      ? 'No working stats in this cache — reload from Overview (needs <strong>hof</strong> on your API key).'
+                      : 'Working stats were not fetched. Enable <strong>Fetch working stats</strong> on Overview, then reload.'}</div>`;
               }
 
               if (_posRows.length) {
-                  html += `<div class="tcm-section-label" style="margin-top:10px;">Average Working Stats by Position</div>
-                  <div style="overflow-x:auto;margin-bottom:10px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
+                  html += `<div class="tcm-section-label" style="margin-top:12px;">By position (working stats)</div>
+                  <div style="overflow-x:auto;margin-bottom:12px;"><table class="tcm-emp" style="width:100%;font-size:12px;border-collapse:collapse;">
                   <thead><tr>
-                      <th style="text-align:left;padding:5px 8px 5px 0;color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;border-bottom:2px solid #2a2a2a;">Position</th>
-                      <th style="text-align:right;padding:5px 4px;color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;border-bottom:2px solid #2a2a2a;">Employees</th>
-                      <th style="text-align:right;padding:5px 4px;color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;border-bottom:2px solid #2a2a2a;">Avg WS</th>
-                      <th style="text-align:right;padding:5px 4px;color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;border-bottom:2px solid #2a2a2a;">Min</th>
-                      <th style="text-align:right;padding:5px 4px;color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;border-bottom:2px solid #2a2a2a;">Max</th>
-                  </tr></thead><tbody>
-                  ${_posRows.map(r => `<tr style="border-bottom:1px solid #111827;">
-                      <td style="padding:6px 8px 6px 0;color:#ddd;">${r.pos}</td>
-                      <td style="text-align:right;padding:5px 4px;color:#9ca3af;">${r.count}</td>
-                      <td style="text-align:right;padding:5px 4px;font-family:'JetBrains Mono',monospace;color:#7eb8ff;font-weight:700;">${r.avg.toLocaleString()}</td>
-                      <td style="text-align:right;padding:5px 4px;color:#888;">${r.min.toLocaleString()}</td>
-                      <td style="text-align:right;padding:5px 4px;color:#888;">${r.max.toLocaleString()}</td>
-                  </tr>`).join('')}
-                  </tbody></table></div>`;
+                      <th style="text-align:left;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Position</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">n</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Avg WS</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Min</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;background:#2a2a2a;color:#ccc;">Max</th>
+                  </tr></thead><tbody>`;
+                  for (const r of _posRows) {
+                      html += `<tr>
+                          <td style="padding:4px 6px;border-bottom:1px solid #333;color:#c8c8c8;">${r.pos}</td>
+                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#aaa;">${r.count}</td>
+                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#7eb8ff;font-weight:700;">${r.avg.toLocaleString()}</td>
+                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.min.toLocaleString()}</td>
+                          <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#888;">${r.max.toLocaleString()}</td>
+                      </tr>`;
+                  }
+                  html += `</tbody></table></div>`;
               }
 
-              html += `<div class="tcm-section-label" style="margin-top:12px;">All Fetched Employees (${_allEmps.length})</div>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-                  <input type="text" id="tcm-benchstats-search" placeholder="Search player or company…"
-                      style="flex:1;min-width:160px;background:#0d1117;border:1px solid #374151;border-radius:3px;color:#ddd;padding:4px 8px;font-size:12px;" />
-                  <select id="tcm-benchstats-sort" style="background:#0d1117;border:1px solid #374151;border-radius:3px;color:#ddd;padding:4px 6px;font-size:12px;">
+              html += `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 8px;">
+                  <input type="search" id="tcm-benchstats-search" placeholder="Search name / company…"
+                      style="flex:1;min-width:140px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#ddd;padding:4px 8px;font-size:12px;" />
+                  <select id="tcm-benchstats-sort" style="background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#ddd;padding:4px 6px;font-size:12px;">
                       <option value="ws" ${sortBy==='ws'?'selected':''}>Sort: Working Stats</option>
                       <option value="company" ${sortBy==='company'?'selected':''}>Sort: Company</option>
                       <option value="position" ${sortBy==='position'?'selected':''}>Sort: Position</option>
@@ -11797,25 +11865,36 @@ const posEntries = Object.entries(posBuckets).sort(([,a],[,b]) => b - a);
                   </select>
                   <button class="tcm-btn" id="tcm-benchstats-dir" style="font-size:12px;padding:4px 10px;">${sortDir === 'desc' ? '↓ Desc' : '↑ Asc'}</button>
               </div>
-              <div style="max-height:480px;overflow-y:auto;border:1px solid #2a2a2a;border-radius:4px;">
+              <div style="max-height:480px;overflow-y:auto;border:1px solid #333;border-radius:4px;">
               <table style="width:100%;border-collapse:collapse;font-size:11px;">
-              <thead><tr style="background:#111827;position:sticky;top:0;">
-                  <th style="text-align:left;padding:5px 6px;color:#9ca3af;">#</th>
-                  <th style="text-align:left;padding:5px 6px;color:#9ca3af;">Player</th>
-                  <th style="text-align:left;padding:5px 6px;color:#9ca3af;">Company</th>
-                  <th style="text-align:left;padding:5px 6px;color:#9ca3af;">Position</th>
-                  <th style="text-align:right;padding:5px 6px;color:#9ca3af;">Working Stats</th>
-              </tr></thead><tbody id="tcm-benchstats-tbody">
-              ${_sorted.map((e, i) => `<tr style="border-top:1px solid #2a2a2a;" data-search="${(e.name + ' ' + e.company).toLowerCase().replace(/"/g, '')}">
-                  <td style="padding:4px 6px;color:#888;">${i+1}</td>
-                  <td style="padding:4px 6px;color:#ddd;">${e.name}</td>
-                  <td style="padding:4px 6px;color:#9ca3af;">${e.company}</td>
-                  <td style="padding:4px 6px;color:#9ca3af;">${e.position}</td>
-                  <td style="padding:4px 6px;text-align:right;font-family:'JetBrains Mono',monospace;color:${e.ws !== null ? '#7eb8ff' : '#4b5563'};font-weight:${e.ws !== null ? '700' : '400'};">${e.ws !== null ? e.ws.toLocaleString() : '—'}</td>
-              </tr>`).join('')}
-              </tbody></table></div>`;
+              <thead><tr style="background:#2a2a2a;position:sticky;top:0;">
+                  <th style="text-align:left;padding:5px 6px;color:#aaa;">#</th>
+                  <th style="text-align:left;padding:5px 6px;color:#aaa;">Player</th>
+                  <th style="text-align:left;padding:5px 6px;color:#aaa;">Company</th>
+                  <th style="text-align:left;padding:5px 6px;color:#aaa;">Position</th>
+                  <th style="text-align:right;padding:5px 6px;color:#aaa;">Working Stats</th>
+              </tr></thead><tbody id="tcm-benchstats-tbody">`;
 
+              html += _sorted.map((e, i) => {
+                  const search = (String(e.name) + ' ' + String(e.company) + ' ' + String(e.position)).toLowerCase().replace(/"/g, '');
+                  const wsCell = e.ws !== null
+                      ? `<span style="color:#7eb8ff;font-weight:700;">${e.ws.toLocaleString()}</span>`
+                      : `<span style="color:#666;">—</span>`;
+                  return `<tr style="border-top:1px solid #2a2a2a;" data-search="${search}">
+                      <td style="padding:4px 6px;color:#888;">${i + 1}</td>
+                      <td style="padding:4px 6px;color:#ddd;">${e.name}</td>
+                      <td style="padding:4px 6px;color:#aaa;">${e.company}</td>
+                      <td style="padding:4px 6px;color:#aaa;">${e.position}</td>
+                      <td style="padding:4px 6px;text-align:right;font-family:Consolas,monospace;">${wsCell}</td>
+                  </tr>`;
+              }).join('');
+
+              html += `</tbody></table></div>`;
               return html;
+              } catch (err) {
+                  console.error('[TCM] Employee Stats render failed:', err);
+                  return `<div class="tcm-notice" style="color:#f88;">Employee Stats failed to render: ${String(err?.message || err)}. Try reloading benchmark from Overview.</div>`;
+              }
           },
 
           _attachBenchmarkHandlers(state) {
@@ -17161,12 +17240,21 @@ const _tickInterval = setInterval(() => { if (UI._currentTab === 'benchmark') _u
         const _myRankIdx  = _hasInc ? _allRankSorted.findIndex(c => _coInc(c) <= _myWeeklyIncome) : -1;
         const _myRankFull = _myRankIdx === -1 ? allCosArr.length : _myRankIdx + 1;
         console.log(`[TCM Benchmark] Rank calc: idx=${_myRankIdx} rank=${_myRankFull}/${allCosArr.length} myWeekly=${_myWeeklyIncome} hasInc=${_hasInc} fetched=${Object.keys(companyData).length}`);
-                                    Storage.saveBenchmarkCache({
-                      ts: Date.now(), typeInt, companies: _companiesSlim,
-                      companyData, filter: selectedCategory,
+                                    // Normalize roster + company keys to strings for Employee Stats lookups
+                  const _companyDataNorm = {};
+                  for (const [_cid, _roster] of Object.entries(companyData || {})) {
+                      _companyDataNorm[String(_cid)] = _roster;
+                  }
+                  const _companiesSlimNorm = {};
+                  for (const [_cid, _meta] of Object.entries(_companiesSlim || {})) {
+                      _companiesSlimNorm[String(_cid)] = _meta;
+                  }
+                  Storage.saveBenchmarkCache({
+                      ts: Date.now(), typeInt, companies: _companiesSlimNorm,
+                      companyData: _companyDataNorm, filter: selectedCategory,
                       sameSize: benchSameSize,
 
-                      fetchedCount: Object.keys(companyData).length,
+                      fetchedCount: Object.keys(_companyDataNorm).length,
                       truncated, totalAvailable: sortedPool.length,
                       myRankFull: _myRankFull, totalCos: allCosArr.length
                   });
