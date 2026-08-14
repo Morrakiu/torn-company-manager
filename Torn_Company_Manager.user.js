@@ -4611,6 +4611,7 @@ _errorMsg(code, raw) {
                       { id: 'optimize',    label: 'Optimize'    },
                       { id: 'projections', label: 'Projections' },
                       { id: 'benchmark',   label: 'Benchmark'   },
+                      { id: 'rolemix',     label: 'Role Mix'    },
                   ],
 training: [
                       { id: 'rotation', label: 'Training'  },
@@ -5468,6 +5469,7 @@ App._pendingLoad = false;
                       break;
                   case 'calc':         body.innerHTML = _ub + this._tabCalc(this.state); this._attachCalcHandlers(this.state); break;
                   case 'benchmark':    body.innerHTML = _ub + this._tabBenchmark(this.state); this._attachBenchmarkHandlers(this.state); break;
+                  case 'rolemix':      body.innerHTML = _ub + this._tabRoleMix(this.state); this._attachRoleMixHandlers(this.state); break;
 case 'proxy_keys':
                   case 'proxy_compare':
                   case 'proxy_history':
@@ -5546,7 +5548,7 @@ const skipOnRefresh = ['calc', 'settings', 'verify'];
   const _onHiringSubTab = this._currentTab === 'optimize' && (Storage.getSettings().optSubTab || 'optimizer') === 'hiring';
   if (!skipOnRefresh.includes(this._currentTab) && !(silent && _onHiringSubTab)) {
 
-const _catForTab = { overview:'management', finance:'management', stock:'management', recs:'expansion', optimize:'expansion', projections:'expansion', benchmark:'expansion', rotation:'training', calc:'training', proxy_keys:'proxy', proxy_compare:'proxy', proxy_history:'proxy', proxy_ee_perf:'proxy' };
+const _catForTab = { overview:'management', finance:'management', stock:'management', recs:'expansion', optimize:'expansion', projections:'expansion', benchmark:'expansion', rolemix:'expansion', rotation:'training', calc:'training', proxy_keys:'proxy', proxy_compare:'proxy', proxy_history:'proxy', proxy_ee_perf:'proxy' };
                   const _syncCat = _catForTab[this._currentTab] || 'management';
                   if (_syncCat !== this._currentCat) {
                       this._currentCat = _syncCat;
@@ -10830,6 +10832,212 @@ const _prSavedPos = Storage.get(posKey, '');
               <div style="font-size:10px;color:#888;margin-top:4px;">Pure WS EE only — no bonuses, no addiction applied · Uses ${posName} stat requirements</div>`;
           },
 
+
+
+          /**
+           * Role-mix tab — peer position averages vs your roster (Morrakiu TCM logic).
+           * Uses Benchmark cache rosters: company/{id}?selections=employees via prior Load Benchmark.
+           * Peer avg = mean headcount in each role across peers with role data; gap = peerAvg - yours.
+           * Optional scaled targets = peerAvg redistributed to your non-director headcount.
+           */
+          _buildRoleMixReport(state) {
+              const profile = state?.profile || {};
+              const employees = state?.employees || {};
+              const typeName = state?.typeName || '';
+              const settings = Storage.getSettings();
+              const savedCat = App._benchSelectedCat || settings.benchSelectedCat || 'same';
+              const benchSameSize = !!settings.benchSameSize;
+              const cache = Storage.getBenchmarkCache(savedCat, benchSameSize);
+              const compData = (cache && cache.companyData) || {};
+              const companies = (cache && cache.companies) || {};
+
+              // Canonical role name (Morrakiu-style: aliases + PosNorm)
+              const canonRole = (pos) => {
+                  const raw = String(pos || '').trim();
+                  if (!raw || raw === 'Director') return null;
+                  try {
+                      if (typeof PosNorm !== 'undefined' && PosNorm.normalize) {
+                          return PosNorm.normalize(raw) || raw;
+                      }
+                  } catch (_e) {}
+                  return (TCM.POSITION_ALIASES && TCM.POSITION_ALIASES[raw]) || raw;
+              };
+
+              // Your role counts (Director excluded — not a staffing slot)
+              const yoursMap = {};
+              let yourStaff = 0;
+              for (const emp of Object.values(employees)) {
+                  if (!emp) continue;
+                  const role = canonRole(emp.position);
+                  if (!role) continue;
+                  yoursMap[role] = (yoursMap[role] || 0) + 1;
+                  yourStaff++;
+              }
+
+              const peerIds = Object.keys(compData).filter(id => {
+                  const roster = compData[id];
+                  if (!roster || typeof roster !== 'object') return false;
+                  return Object.values(roster).some(e => e && canonRole(e.position));
+              });
+
+              // Per-peer role counts, then average across peers (Morrakiu lastPeerReport logic)
+              const roleTotals = {}; // sum of per-peer counts
+              let peersWithRoles = 0;
+              for (const id of peerIds) {
+                  const counts = {};
+                  for (const emp of Object.values(compData[id] || {})) {
+                      if (!emp) continue;
+                      const role = canonRole(emp.position);
+                      if (!role) continue;
+                      counts[role] = (counts[role] || 0) + 1;
+                  }
+                  const n = Object.values(counts).reduce((a, b) => a + b, 0);
+                  if (n < 1) continue;
+                  peersWithRoles++;
+                  for (const [role, cnt] of Object.entries(counts)) {
+                      roleTotals[role] = (roleTotals[role] || 0) + cnt;
+                  }
+              }
+
+              const allRoles = new Set([...Object.keys(yoursMap), ...Object.keys(roleTotals)]);
+              const denom = peersWithRoles || 0;
+              const rows = [];
+              for (const role of allRoles) {
+                  const yours = yoursMap[role] || 0;
+                  const peerAvg = denom ? (roleTotals[role] || 0) / denom : 0;
+                  rows.push({
+                      role,
+                      yours,
+                      peerAvg,
+                      gap: peerAvg - yours
+                  });
+              }
+              // Sort: largest peer avg first, then by |gap|
+              rows.sort((a, b) => (b.peerAvg - a.peerAvg) || (Math.abs(b.gap) - Math.abs(a.gap)));
+
+              // Scaled targets to our headcount (getPeerRoleTargets logic)
+              let targets = null;
+              if (denom && yourStaff > 0 && rows.length) {
+                  const sumAvg = rows.reduce((s, r) => s + (Number(r.peerAvg) || 0), 0);
+                  if (sumAvg > 0) {
+                      targets = {};
+                      for (const r of rows) {
+                          targets[r.role] = ((Number(r.peerAvg) || 0) / sumAvg) * yourStaff;
+                      }
+                  }
+              }
+
+              // Persist lightweight report for other features (Best Position / optimize)
+              try {
+                  const report = {
+                      typeName,
+                      peerCount: peerIds.length,
+                      peersWithRoles,
+                      rows,
+                      targets,
+                      yourStaff,
+                      filter: savedCat,
+                      sameSize: benchSameSize,
+                      updated: Date.now()
+                  };
+                  GM_setValue(TCM.NS + 'lastPeerReport', JSON.stringify(report));
+              } catch (_e) {}
+
+              return {
+                  cache,
+                  savedCat,
+                  benchSameSize,
+                  peerIds,
+                  peersWithRoles,
+                  rows,
+                  targets,
+                  yourStaff,
+                  typeName,
+                  companies
+              };
+          },
+
+          _tabRoleMix(state) {
+              const catLabels = { same: 'Same ★', above: 'Above ★', top: 'Top', ten: '10★' };
+              const report = this._buildRoleMixReport(state);
+              const { cache, savedCat, benchSameSize, peersWithRoles, rows, targets, yourStaff, typeName } = report;
+
+              let html = `<div class="tcm-section-label">Role Mix
+                  <span style="font-size:10px;color:#888;font-weight:400;text-transform:none;letter-spacing:0;">
+                      ${typeName ? '· ' + typeName : ''} · ${catLabels[savedCat] || savedCat}${benchSameSize ? ' · same size' : ''}
+                  </span>
+              </div>`;
+              html += `<div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:10px;">
+                  Compares your non-director staffing to the <strong>average role counts</strong> of peers in the current Benchmark pool.
+                  Uses Torn API <code>company/{id}?selections=employees</code> (loaded via <strong>Expansion → Benchmark</strong>).
+                  Gap = peer avg − you (positive = peers staff this role more). Target* = peer mix scaled to your headcount.
+              </div>`;
+
+              if (!cache || !Object.keys(cache.companyData || {}).length) {
+                  html += `<div class="tcm-rec medium"><div class="rec-title">No peer roster data</div>
+                      <div class="rec-body">Load a benchmark first: open <strong>Expansion → Benchmark</strong>, pick a filter, then <strong>Load Benchmark</strong>.
+                      Role mix will use those company rosters.</div></div>
+                      <button class="tcm-btn green" id="tcm-rolemix-goto-bench" style="margin-top:8px;">Go to Benchmark</button>`;
+                  return html;
+              }
+
+              if (!peersWithRoles) {
+                  html += `<div class="tcm-rec medium"><div class="rec-title">Peers loaded but no role data</div>
+                      <div class="rec-body">${Object.keys(cache.companyData || {}).length} companies in cache, but no non-director positions were found. Reload benchmark.</div></div>`;
+                  return html;
+              }
+
+              html += `<div class="tcm-card" style="margin-bottom:10px;"><div class="tcm-card-body">
+                  <div class="tcm-row"><span class="lbl">Peers with role data</span><span class="val">${peersWithRoles}</span></div>
+                  <div class="tcm-row"><span class="lbl">Your staff (excl. Director)</span><span class="val">${yourStaff}</span></div>
+                  <div class="tcm-row"><span class="lbl">Positions compared</span><span class="val">${rows.length}</span></div>
+              </div></div>`;
+
+              html += `<div style="overflow-x:auto;"><table class="tcm-emp" style="width:100%;border-collapse:collapse;font-size:12px;">
+                  <thead><tr>
+                      <th style="text-align:left;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Position</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">You</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Peer avg</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Gap</th>
+                      <th style="text-align:right;padding:4px 6px;border-bottom:1px solid #333;color:#ccc;background:#2a2a2a;">Target*</th>
+                  </tr></thead><tbody>`;
+
+              for (const row of rows) {
+                  const gap = Number(row.gap) || 0;
+                  const gapCol = gap >= 0.75 ? '#fc6' : gap <= -0.75 ? '#6f6' : '#c8c8c8';
+                  const gapStr = (gap >= 0 ? '+' : '') + gap.toFixed(1);
+                  const tgt = targets && targets[row.role] != null ? targets[row.role].toFixed(1) : '—';
+                  html += `<tr>
+                      <td style="padding:4px 6px;border-bottom:1px solid #333;color:#c8c8c8;">${row.role}</td>
+                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#ddd;">${row.yours}</td>
+                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#aaa;">${Number(row.peerAvg).toFixed(1)}</td>
+                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:${gapCol};font-weight:600;">${gapStr}</td>
+                      <td style="padding:4px 6px;border-bottom:1px solid #333;text-align:right;color:#7eb8ff;">${tgt}</td>
+                  </tr>`;
+              }
+              html += `</tbody></table></div>`;
+              html += `<div style="font-size:11px;color:#888;margin-top:8px;line-height:1.45;">
+                  * <strong>Target</strong> = peer role mix scaled to your headcount (${yourStaff}) for staffing guidance.
+                  Roles with gap ≥ +0.75 are under-filled vs peers; ≤ −0.75 are over-staffed vs peers.
+              </div>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                  <button class="tcm-btn" id="tcm-rolemix-refresh">↻ Recalculate</button>
+                  <button class="tcm-btn" id="tcm-rolemix-goto-bench">Benchmark settings</button>
+              </div>`;
+              return html;
+          },
+
+          _attachRoleMixHandlers(state) {
+              document.getElementById('tcm-rolemix-goto-bench')?.addEventListener('click', () => {
+                  // Switch to expansion / benchmark sub-tab
+                  document.querySelectorAll('.tcm-cat').forEach(c => c.classList.toggle('active', c.dataset.cat === 'expansion'));
+                  if (typeof this._renderSubTabs === 'function') this._renderSubTabs('expansion', 'benchmark');
+                  this._renderTab('benchmark');
+              });
+              document.getElementById('tcm-rolemix-refresh')?.addEventListener('click', () => {
+                  this._renderTab('rolemix');
+              });
+          },
 
           _tabBenchmark(state) {
               const { typeName, typeInt } = state;
