@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.6.3-unlicensed
+// @version      10.6.3-alpha
 // @charset      utf-8
-// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations.
+// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -30,7 +30,7 @@
       'use strict';
 
       const TCM = {
-          VERSION: '10.6.3-unlicensed',
+          VERSION: '10.6.3-alpha',
           NS: 'TCM_v2_',
           API_BASE: 'https://api.torn.com',
           API_RATE_LIMIT_MS: 1000,
@@ -164,7 +164,7 @@
   let _tcmLic = true;
   let _tcmInit = 0;
       const License = {
-          // Licensing removed — always grant access
+          // Access always granted
           _sessionVerified: true,
           _readCache() {
               return {
@@ -13203,10 +13203,6 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                       <div style="font-size:10px;color:#4b5563;padding:3px 0 4px;">${_breakdown.join(' · ') || 'All keys are small'}</div>${_warn}`;
                   })()}
                   <div class="tcm-row"><span class="lbl">Version</span><span class="val">${TCM.VERSION}</span></div>
-                  <div class="tcm-row">
-                      <span class="lbl" title="Date the built-in position stat requirements were last manually verified against Torn Wiki. These values are hardcoded — they are NOT fetched from the API.">Position DB verified ⓘ</span>
-                      <span class="val" style="color:#9ca3af;">${TCM.DATA_VERIFIED} <span style="font-size:10px;color:#4b5563;">(hardcoded, not API)</span></span>
-                  </div>
                   <hr class="tcm-divider">
                   <button class="tcm-btn" id="tcm-back-btn">← Back</button>
               `;
@@ -13704,7 +13700,7 @@ document.getElementById('tcm-tornstats-paste').value = '';
 if (k) { Storage.setApiKey(k); document.getElementById('tcm-body').innerHTML = '<div class="tcm-loading"><span class="tcm-spin"></span>Verifying new key...</div>'; App.refresh(); }
               });
               document.getElementById('tcm-full-reset-btn').addEventListener('click', () => {
-                  if (confirm('Wipe ALL TCM data for this script (key, license cache, settings, everything)?')) Storage.fullReset();
+                  if (confirm('Wipe ALL TCM data for this script (key, settings, everything)?')) Storage.fullReset();
               });
           },
 
@@ -13726,21 +13722,18 @@ showCompanyKeyNeeded(reason) {
 Your API key <strong>can't</strong> pull data for this company (${reason?.msg || 'access level too low'}).<br><br>
                           You need a key from <strong>someone employed at (or directing) the company</strong> — paste it below.<br><br>
                           <span style="color:#7eb8ff;">✔ Safe:</span> that key is used <strong>only</strong> to read company data.
-                          It's <strong>never</strong> checked for a TCM license, and its owner gets
-                          <strong>no</strong> TCM access of their own.
+                          Its owner gets <strong>no</strong> extra access of their own.
                       </div>
                   </div>
 <input class="tcm-input" id="tcm-company-key-input" type="password" placeholder="Paste director's API key here..." style="width:100%;box-sizing:border-box;margin:12px 0 8px;" />
                   <button class="tcm-btn green" id="tcm-company-key-save-btn">Save & Load</button>
                   <button class="tcm-btn" id="tcm-company-key-cancel-btn" style="margin-top:6px;">Change my own API key instead</button>
-                  <button class="tcm-btn" id="tcm-company-key-lic-reset-btn" style="margin-top:6px;">Reset License Check</button>
               `;
               document.getElementById('tcm-company-key-save-btn').addEventListener('click', () => {
                   const k = document.getElementById('tcm-company-key-input').value.trim();
                   if (k) { Storage.setCompanyKey(k); App._refreshInFlight = false; App.refresh(); }
               });
               document.getElementById('tcm-company-key-cancel-btn').addEventListener('click', () => this.showSetup());
-              document.getElementById('tcm-company-key-lic-reset-btn').addEventListener('click', () => License.resetLicenseCache());
           },
                     showError(msg) {
       const wasOpen = this.container && this.container.style.display !== 'none';
@@ -13755,12 +13748,10 @@ Your API key <strong>can't</strong> pull data for this company (${reason?.msg ||
                   <div style="display:flex;gap:8px;margin-top:8px;">
                       <button class="tcm-btn" id="tcm-retry-btn">Retry</button>
                       <button class="tcm-btn" id="tcm-rekey-btn">Change API Key</button>
-                      <button class="tcm-btn" id="tcm-lic-reset-btn">Reset License Check</button>
                   </div>
               `;
               document.getElementById('tcm-retry-btn').addEventListener('click', () => App.refresh());
               document.getElementById('tcm-rekey-btn').addEventListener('click', () => this.showSetup());
-              document.getElementById('tcm-lic-reset-btn').addEventListener('click', () => License.resetLicenseCache());
           },
 
           setLoading() {
@@ -14119,11 +14110,11 @@ Your API key <strong>can't</strong> pull data for this company (${reason?.msg ||
               let msg;
               const _canRecheck = (status === 'revoked' || status === 'not_found');
               if (status === 'banned') {
-                  msg = 'This account has been banned from TCM.';
+                  msg = 'Access was denied for this account.';
               } else if (status === 'not_found') {
-                  msg = 'Your Torn ID is not registered for TCM access. Please contact <a href="https://www.torn.com/profiles.php?XID=4053619" target="_blank" style="color:#7eb8ff;text-decoration:underline;">_Solenya_ [4053619]</a> to request access.';
+                  msg = 'Could not verify access for this Torn ID. Retry or check your API key.';
               } else {
-                  msg = 'Your TCM license has been revoked. Contact <a href="https://www.torn.com/profiles.php?XID=4053619" target="_blank" style="color:#7eb8ff;text-decoration:underline;">_Solenya_ [4053619]</a> if you think this is an error.';
+                  msg = 'Access was denied. Retry or check your API key.';
               }
               const _licRd = License._readCache();
               const _limReached = License._dailyLimitReached(_licRd);
@@ -14139,13 +14130,13 @@ Your API key <strong>can't</strong> pull data for this company (${reason?.msg ||
   <div style="font-size:10px;color:#4b5563;margin-top:6px;">${_reqs}/${(2+2)} checks used today${_limReached ? ' · limit reached' : ''}</div>
 </div>` : ''}
                       <div style="margin-top:14px;">
-                          <button id="tcm-denied-reset-btn" class="tcm-btn" style="font-size:12px;">Reset License Check</button>
+                          
                       </div>
                   </div>`;
               if (App._countdownTimer)  { clearInterval(App._countdownTimer);  App._countdownTimer  = null; }
               if (App._hourlyTimer)     { clearInterval(App._hourlyTimer);      App._hourlyTimer     = null; }
               UI._setStatus('Access denied', 'err');
-              document.getElementById('tcm-denied-reset-btn')?.addEventListener('click', () => License.resetLicenseCache());
+              
               if (_canRecheck && !_limReached) {
                   document.getElementById('tcm-denied-recheck-btn')?.addEventListener('click', () => {
 const _myId = UI.state?.myTornId
@@ -16012,7 +16003,7 @@ async _ensureMyTornId() {
                   if (id) GM_setValue(TCM.NS + 'my_torn_id', id);
                   return id;
               } catch (e) {
-                  console.warn('[TCM] Could not resolve own Torn ID for license check:', e);
+                  console.warn('[TCM] Could not resolve own Torn ID:', e);
                   return '';
               }
           },
@@ -16295,7 +16286,7 @@ employees, typeName, typeInt, directorId, myTornId, detailed, _cachedAt: Date.no
 
 console.log('[TCM DEBUG] myTornId resolved to:', JSON.stringify(myTornId));
 
-                  // Licensing removed — always render
+                  // Always render
                   UI.render(state, silent);
                   if (typeInt) {
                       setTimeout(() => App.fetchRankingIfStale(typeInt).catch(() => {}), 1500);
@@ -16627,7 +16618,7 @@ const _licCachedMyId = (() => {
                   } catch(_sce) {}
               };
 
-              // Licensing removed — hydrate cached state freely
+              // Hydrate cached state
               if (_licCachedMyId) {
                   _hydrateCachedState();
               }
