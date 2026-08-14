@@ -3,8 +3,7 @@
 // @namespace    TCM
 // @version      10.6.3-unlicensed
 // @charset      utf-8
-// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered. Licensing removed — permanently free to use.
-// @author       Morrakiu
+// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @match        https://tornstats.com/*
