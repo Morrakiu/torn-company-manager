@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.6.6-alpha
+// @version      10.7.0-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -32,7 +32,7 @@
       'use strict';
 
       const TCM = {
-          VERSION: '10.6.3-alpha',
+          VERSION: '10.7.0-alpha',
           NS: 'TCM_v2_',
           API_BASE: 'https://api.torn.com',
           API_RATE_LIMIT_MS: 1000,
@@ -2686,7 +2686,56 @@ const _rateMs = Math.round(60000 / Math.max(10, Math.min(100, parseInt(Storage.g
 getCompanyData() {
               const key = Storage.getCompanyKey() || Storage.getApiKey();
               if (!key) return Promise.reject({ code: 0, msg: 'No API key set.' });
-              return this.call(`${TCM.API_BASE}/company/?selections=profile,employees,detailed,stock,news&key=${key}`);
+              // Progressive selections — directors usually get full data; employees often only public slices.
+              const attempts = [
+                  { selections: 'profile,employees,detailed,stock,news', level: 'full' },
+                  { selections: 'profile,employees,news', level: 'member' },
+                  { selections: 'profile,employees', level: 'member' },
+                  { selections: 'profile', level: 'profile' }
+              ];
+              const accessCodes = new Set([15, 16]);
+              const self = this;
+              return (async () => {
+                  let lastErr = null;
+                  for (const att of attempts) {
+                      try {
+                          const data = await self.call(
+                              `${TCM.API_BASE}/company/?selections=${att.selections}&key=${key}`
+                          );
+                          if (data && data.error) {
+                              const code = data.error.code;
+                              lastErr = { code, msg: (API._errorMsg && API._errorMsg(code, data.error.error)) || data.error.error };
+                              if (accessCodes.has(code)) continue;
+                              throw lastErr;
+                          }
+                          const hasDetailed = !!(data.company_detailed && Object.keys(data.company_detailed).length);
+                          const stockObj = data.company_stock || data.stock || {};
+                          const hasStock = !!(stockObj && Object.keys(stockObj).length);
+                          const hasEmployees = !!(data.company_employees && Object.keys(data.company_employees).length);
+                          let accessLevel = att.level;
+                          if (accessLevel === 'full' && (!hasDetailed || !hasStock)) {
+                              accessLevel = hasEmployees ? 'member' : 'profile';
+                          }
+                          data._tcmAccess = {
+                              level: accessLevel,
+                              selections: att.selections,
+                              hasDetailed,
+                              hasStock,
+                              hasEmployees,
+                              hasNews: !!(data.news || data.company_news)
+                          };
+                          return data;
+                      } catch (e) {
+                          lastErr = e;
+                          const code = e && e.code;
+                          if (accessCodes.has(code)) continue;
+                          const msg = String((e && (e.msg || e.message)) || e || '').toLowerCase();
+                          if (/access|permission|selection|privileg|insufficient/i.test(msg)) continue;
+                          throw e;
+                      }
+                  }
+                  throw lastErr || { code: 16, msg: 'Access level too low for company data.' };
+              })();
           },
 
 getMyTornId() {
@@ -5108,7 +5157,20 @@ training: [
                   if (!subContainer) return;
                   subContainer.innerHTML = '';
                   let tabs = _CAT_MAP[cat] || [];
-                  if (cat === 'management') {
+                  if (this.state?.limitedMode) {
+                      // Public / non-director: only tabs that make sense without private director data
+                      const allowed = {
+                          management: ['overview'],
+                          expansion: ['benchmark'],
+                          training: ['rotation', 'calc'],
+                          proxy: ['proxy_keys', 'proxy_compare', 'proxy_history', 'proxy_ee_perf']
+                      };
+                      const allow = new Set(allowed[cat] || []);
+                      if (cat === 'management' && this.state?.accessMeta?.hasStock && this.state?.stock && Object.keys(this.state.stock).length) {
+                          allow.add('stock');
+                      }
+                      tabs = tabs.filter(t => allow.has(t.id));
+                  } else if (cat === 'management') {
                       const hasStock = !!(this.state?.stock && Object.keys(this.state.stock).length > 0);
                       tabs = tabs.filter(t => t.id !== 'stock' || hasStock);
                   }
@@ -5202,11 +5264,35 @@ App._pendingLoad = false;
               const body = document.getElementById('tcm-body');
               if (!body) return;
 
+              // Limited mode: bounce off director-only tabs
+              if (this.state?.limitedMode && tab && tab !== 'settings') {
+                  const limitedOk = new Set(['overview','benchmark','rotation','calc','stock','proxy_keys','proxy_compare','proxy_history','proxy_ee_perf']);
+                  if (tab === 'stock' && !(this.state.accessMeta?.hasStock)) limitedOk.delete('stock');
+                  if (!limitedOk.has(tab)) {
+                      tab = 'overview';
+                      this._currentTab = 'overview';
+                  }
+              }
+
               if (!this.state) {
                   body.innerHTML = '<div class="tcm-loading"><span class="tcm-spin"></span>Loading data...</div>';
                   return;
               }
-              const _ub = (this._updateBannerHTML ? this._updateBannerHTML() : '');
+              const _ubUpdate = (this._updateBannerHTML ? this._updateBannerHTML() : '');
+              const _ubLimited = (this.state?.limitedMode) ? (
+                  `<div class="tcm-notice" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:10px;line-height:1.55;">
+                      <strong style="color:#f59e0b;">Limited view</strong>
+                      <span style="color:#ccc;"> — non-director / public data only.
+                      ${this.state.isDirector ? 'Your key is missing some director selections.' : 'You are not the company director.'}
+                      Access: <code>${this.state.accessLevel || 'member'}</code>
+                      ${this.state.accessMeta?.hasEmployees ? ' · roster' : ''}
+                      ${this.state.accessMeta?.hasDetailed ? ' · detailed' : ''}
+                      ${this.state.accessMeta?.hasStock ? ' · stock' : ''}.
+                      Director-only tools are hidden. Paste a director key in Settings for the full dashboard.
+                      </span>
+                  </div>`
+              ) : '';
+              const _ub = _ubUpdate + _ubLimited;
               switch (tab) {
                   case 'overview':
                       body.innerHTML = _ub + this._tabOverview(this.state);
@@ -14398,7 +14484,8 @@ document.getElementById('tcm-tornstats-paste').value = '';
               body.innerHTML = `
                   <div class="tcm-section-label">Welcome to Torn Company Manager v${TCM.VERSION}</div>
                   <div class="tcm-notice" style="line-height:1.7;">
-                      A <strong>custom key</strong> is all you need — no full access required.<br>
+                      A <strong>custom key</strong> is all you need — same link for directors and employees.<br>
+                      <span style="color:#aaa;font-size:11px;">Directors get the full dashboard. Employees / non-directors get a <strong>limited public-data view</strong> (whatever Torn returns for your role).</span><br>
 <a href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&company=search,snapshot,companies,employees,profile,detailed,applications,news,stock&user=hof,basic,log&logIds=104&title=TCM"
                  target="_blank" rel="noopener"
                  style="display:inline-block;margin-top:6px;background:rgba(126,184,255,0.15);
@@ -14424,7 +14511,53 @@ if (k) { Storage.setApiKey(k); document.getElementById('tcm-body').innerHTML = '
               });
           },
 
-showCompanyKeyNeeded(reason) {
+showLimitedAccessHelp(reason) {
+              if (this.container) this.container.style.display = 'flex';
+              const body = document.getElementById('tcm-body');
+              if (!body) return;
+              const msg = reason?.msg || 'Access level too low for full company data.';
+              body.innerHTML = `
+                  <div class="tcm-section-label">Limited access</div>
+                  <div class="tcm-notice" style="line-height:1.65;margin-bottom:12px;">
+                      Your key could not load full company data (${msg}).
+                      <br><br>
+                      <strong>Employees / non-directors:</strong> TCM can still run in a
+                      <strong>limited public-data view</strong> once a key that can read at least
+                      <code>company · profile</code> (and preferably <code>employees</code>) is set.
+                      Use the same custom-key link as directors — Torn only returns the fields your role allows.
+                      <br><br>
+                      <strong>Directors:</strong> paste a company-capable key below (your own or a director key for this company).
+                  </div>
+                  <div style="margin-bottom:10px;">
+                      <a href="https://www.torn.com/preferences.php#tab=api?step=addNewKey&company=applications,detailed,employees,news,profile,stock&user=hof,basic,log&logIds=104&title=TCM"
+                         target="_blank" rel="noopener"
+                         style="display:inline-block;background:rgba(126,184,255,0.15);border:1px solid rgba(126,184,255,0.4);color:#7eb8ff;border-radius:5px;padding:6px 14px;font-size:12px;font-weight:700;text-decoration:none;">
+                         ⚡ Create Custom TCM Key →
+                      </a>
+                  </div>
+                  <input class="tcm-input" id="tcm-company-key-input" type="password" placeholder="Paste API key (personal or company)…" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                      <button class="tcm-btn green" id="tcm-company-key-save-btn">Save &amp; Retry</button>
+                      <button class="tcm-btn" id="tcm-limited-retry-btn">Retry with current key</button>
+                      <button class="tcm-btn" id="tcm-company-key-cancel-btn">Change personal key</button>
+                  </div>
+              `;
+              document.getElementById('tcm-company-key-save-btn')?.addEventListener('click', () => {
+                  const k = document.getElementById('tcm-company-key-input')?.value?.trim();
+                  if (k) {
+                      Storage.setCompanyKey(k);
+                      App._refreshInFlight = false;
+                      App.refresh();
+                  }
+              });
+              document.getElementById('tcm-limited-retry-btn')?.addEventListener('click', () => {
+                  App._refreshInFlight = false;
+                  App.refresh();
+              });
+              document.getElementById('tcm-company-key-cancel-btn')?.addEventListener('click', () => this.showSetup());
+          },
+
+          showCompanyKeyNeeded(reason) {
               if (this.container) this.container.style.display = 'flex';
               if (!document.getElementById('tcm-pulse-style')) {
                   GM_addStyle('@keyframes tcmPulse{0%,100%{box-shadow:0 0 0 0 rgba(126,184,255,0.35);}50%{box-shadow:0 0 0 6px rgba(126,184,255,0);}}');
@@ -16769,16 +16902,25 @@ try {
                   ]);
 
 if (data.status === 'rejected') {
-
-                      const _needsCompanyKey = [6, 7, 15, 16].includes(data.reason?.code);
-                      if (_needsCompanyKey) {
-                          UI.showCompanyKeyNeeded(data.reason);
+                      const _code = data.reason?.code;
+                      // Incorrect / empty key — hard fail
+                      if ([1, 2].includes(_code)) {
+                          UI.showError(data.reason?.msg || 'API key error');
+                          this._refreshInFlight = false;
+                          return;
+                      }
+                      // Even progressive load failed — offer company key help + limited-mode note
+                      if ([6, 7, 15, 16].includes(_code)) {
+                          UI.showLimitedAccessHelp(data.reason);
                           this._refreshInFlight = false;
                           return;
                       }
                       throw data.reason;
                   }
                   const companyData = data.value;
+                  const _tcmAccess = companyData._tcmAccess || {
+                      level: 'full', hasDetailed: true, hasStock: true, hasEmployees: true, hasNews: true
+                  };
 
                   const profile   = companyData.company           || {};
                   const employees = companyData.company_employees || {};
@@ -16970,6 +17112,20 @@ if (!_spHasEntry || !_spIsPostReset) {
                       }
                   }
 
+const _isDirector = !!(myTornId && directorId && String(myTornId) === String(directorId));
+                  // Also treat "Director" position as director if id matches roster
+                  let _rosterSaysDir = false;
+                  try {
+                      const _me = employees && myTornId ? employees[String(myTornId)] || employees[myTornId] : null;
+                      if (_me && String(_me.position || '') === 'Director') _rosterSaysDir = true;
+                  } catch (_e) {}
+                  const isDirector = _isDirector || _rosterSaysDir;
+                  const accessLevel = _tcmAccess.level || (isDirector ? 'full' : 'member');
+                  // Limited view for non-directors (public/role-scoped data only).
+                  // Directors keep the full UI even if a selection was empty this tick.
+                  // Profile-only access (no employees) is treated as limited for everyone.
+                  const limitedMode = !isDirector || accessLevel === 'profile';
+
 const state = {
       profile,
       employees,
@@ -16982,7 +17138,11 @@ const state = {
       todayNews,
       stock: stockRaw,
       directorId,
-      myTornId
+      myTornId,
+      isDirector,
+      limitedMode,
+      accessLevel,
+      accessMeta: _tcmAccess
   };
 
 
