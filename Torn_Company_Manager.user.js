@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.7.0-alpha
+// @version      10.8.3-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -1036,6 +1036,290 @@ getTodayTrained() {
               const all = this.getPaidContracts();
               all.push(c);
               this.set('paid_contracts', all);
+          },
+          /** Normalize payments on a contract (migrates legacy prepaidAmount). */
+          getContractPayments(c) {
+              if (!c) return [];
+              if (Array.isArray(c.payments) && c.payments.length) {
+                  return c.payments.map(p => ({
+                      id: p.id || ('p_' + (p.ts || p.date || Math.random())),
+                      amount: Number(p.amount) || 0,
+                      date: p.date || c.startDate || '',
+                      note: p.note || '',
+                      ts: p.ts || 0
+                  })).filter(p => p.amount > 0);
+              }
+              if (Number(c.prepaidAmount) > 0) {
+                  return [{
+                      id: 'prepaid',
+                      amount: Number(c.prepaidAmount) || 0,
+                      date: c.startDate || '',
+                      note: 'Prepaid at start',
+                      ts: 0
+                  }];
+              }
+              return [];
+          },
+          contractAmountPaid(c) {
+              return this.getContractPayments(c).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+          },
+          isOpenEndedContract(c) {
+              if (!c) return false;
+              if (c.openEnded === true) return true;
+              if (c.openEnded === false) return false;
+              const t = Number(c.totalTrains);
+              return !(t > 0);
+          },
+          /** YYYY-MM-DD day difference (b - a), UTC. */
+          daysBetweenIso(a, b) {
+              if (!a || !b) return 0;
+              const pa = String(a).slice(0, 10).split('-').map(Number);
+              const pb = String(b).slice(0, 10).split('-').map(Number);
+              const da = Date.UTC(pa[0], pa[1] - 1, pa[2]);
+              const db = Date.UTC(pb[0], pb[1] - 1, pb[2]);
+              return Math.round((db - da) / 86400000);
+          },
+          addDaysIso(iso, days) {
+              const p = String(iso).slice(0, 10).split('-').map(Number);
+              const d = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
+              d.setUTCDate(d.getUTCDate() + (Number(days) || 0));
+              return d.toISOString().slice(0, 10);
+          },
+          countContractTrainsDone(c, log) {
+              if (!c || !c.buyerEmpId) return 0;
+              const start = c.startDate || '';
+              const raw = (log && log[c.buyerEmpId]) || [];
+              const seen = new Set();
+              let n = 0;
+              for (const e of raw) {
+                  if (!e || !e.ts) continue;
+                  if (start && e.date < start) continue;
+                  const k = e._logId || e.ts;
+                  if (seen.has(k)) continue;
+                  seen.add(k);
+                  n++;
+              }
+              return n;
+          },
+          /**
+           * How many trains this contract reserves on dateStr (0 if inactive that day).
+           * Fixed contracts stop reserving once their total is projected complete.
+           */
+          contractReservationOnDate(c, dateStr, log) {
+              const day = String(dateStr || '').slice(0, 10);
+              if (!c || !day) return 0;
+              if (c.active === false || c.deleted) return 0;
+
+              // Prefer shared schedule simulator (handles open-ended, partial last day, one-shot)
+              const today = new Date().toISOString().slice(0, 10);
+              if (day >= today) {
+                  try {
+                      const state = (typeof UI !== 'undefined' && UI.state) ? UI.state : {};
+                      const horizon = Math.max(1, this.daysBetweenIso(today, day) + 1);
+                      const sim = this.simulateBuyerSchedule(state, {
+                          horizon,
+                          fromDate: today,
+                          log: log || this.getTrainedLog()
+                      });
+                      const row = sim.days.find(r => r.date === day);
+                      if (!row) return 0;
+                      const hit = (row.allocs || []).find(a => String(a.id) === String(c.id));
+                      return hit ? (hit.trains || 0) : 0;
+                  } catch (e) {
+                      console.warn('[TCM] contractReservationOnDate sim failed', e);
+                  }
+              }
+
+              // Historical fallback
+              const start = (c.startDate || '').slice(0, 10);
+              if (start && day < start) return 0;
+              let res = Number(c.dailyReservation) || 0;
+              const openEnded = this.isOpenEndedContract(c);
+              if (openEnded) return res > 0 ? res : 0;
+              const total = Number(c.totalTrains) || 0;
+              if (total <= 0) return 0;
+              if (res <= 0) res = total;
+              const idx = start ? this.daysBetweenIso(start, day) : 0;
+              if (idx < 0) return 0;
+              const before = idx * res;
+              if (before >= total) return 0;
+              return Math.min(res, total - before);
+          },
+          /**
+           * Day-by-day buyer allocations from today (UTC/TCT date).
+           * Same rules as the Train Sales 7-day schedule table.
+           * opts.excludeId — omit a contract (when editing its reservation)
+           * opts.horizon — number of days (default 14)
+           * opts.fromDate — start simulation on this YYYY-MM-DD (default today UTC)
+           */
+          simulateBuyerSchedule(state, opts) {
+              opts = opts || {};
+              const log = opts.log || this.getTrainedLog();
+              const excludeId = opts.excludeId;
+              const horizon = Math.max(1, Math.min(60, Number(opts.horizon) || 14));
+              const fromDate = (opts.fromDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+              const { base } = this.dailyTrainBudget(state);
+
+              // Include any active contract with remaining work OR a daily reservation.
+              // (Previously required dailyReservation > 0, so fixed deals with only total trains never appeared.)
+              const sales = (this.getTrainSales() || []).filter(c => {
+                  if (!c || c.active === false || c.deleted) return false;
+                  if (excludeId && String(c.id) === String(excludeId)) return false;
+                  const res = Number(c.dailyReservation) || 0;
+                  if (res > 0) return true;
+                  if (this.isOpenEndedContract(c)) return false; // open-ended needs a daily rate
+                  const total = Number(c.totalTrains) || 0;
+                  if (total <= 0) return false;
+                  const done = this.countContractTrainsDone(c, log);
+                  return (total - done) > 0;
+              });
+
+              const simLeft = {};
+              const simDaily = {};
+              for (const c of sales) {
+                  const res = Number(c.dailyReservation) || 0;
+                  if (this.isOpenEndedContract(c)) {
+                      simLeft[c.id] = Infinity;
+                      simDaily[c.id] = res; // must be > 0 to be in sales
+                  } else {
+                      const total = Number(c.totalTrains) || 0;
+                      const done = this.countContractTrainsDone(c, log);
+                      const left = Math.max(0, total - done);
+                      simLeft[c.id] = left;
+                      // No daily rate set → deliver remaining on the start day (one-shot)
+                      simDaily[c.id] = res > 0 ? res : left;
+                  }
+              }
+
+              const days = [];
+              for (let i = 0; i < horizon; i++) {
+                  const dayIso = this.addDaysIso(fromDate, i);
+                  const allocs = [];
+                  for (const c of sales) {
+                      const st = (c.startDate || '').slice(0, 10);
+                      if (st && dayIso < st) continue;
+                      const left = simLeft[c.id];
+                      if (!(left > 0)) continue;
+                      const res = Number(simDaily[c.id]) || 0;
+                      if (res <= 0) continue;
+                      const trains = left === Infinity ? res : Math.min(res, left);
+                      if (trains <= 0) continue;
+                      allocs.push({
+                          id: c.id,
+                          name: c.buyerName || c.buyerEmpId,
+                          trains,
+                          openEnded: this.isOpenEndedContract(c)
+                      });
+                      if (simLeft[c.id] !== Infinity) {
+                          simLeft[c.id] = Math.max(0, simLeft[c.id] - trains);
+                      }
+                  }
+                  const usedByBuyers = allocs.reduce((s, a) => s + a.trains, 0);
+                  days.push({
+                      date: dayIso,
+                      usedByBuyers,
+                      rotationTrains: Math.max(0, base - usedByBuyers),
+                      free: Math.max(0, base - usedByBuyers),
+                      reserved: usedByBuyers,
+                      allocs
+                  });
+              }
+              return { base, fromDate, days };
+          },
+          reservedTrainsOnDate(dateStr, opts) {
+              opts = opts || {};
+              const day = String(dateStr || '').slice(0, 10);
+              if (!day) return 0;
+              const today = new Date().toISOString().slice(0, 10);
+              // Simulate from today through the target date (or from target if in the past — still from today with remaining)
+              if (day < today) {
+                  // Past: walk each contract individually
+                  const log = opts.log || this.getTrainedLog();
+                  const excludeId = opts.excludeId;
+                  let sum = 0;
+                  for (const c of (this.getTrainSales() || [])) {
+                      if (excludeId && String(c.id) === String(excludeId)) continue;
+                      sum += this.contractReservationOnDate(c, day, log);
+                  }
+                  return sum;
+              }
+              const state = opts.state || (typeof UI !== 'undefined' ? UI.state : null) || {};
+              const horizon = Math.max(1, this.daysBetweenIso(today, day) + 1);
+              const sim = this.simulateBuyerSchedule(state, {
+                  excludeId: opts.excludeId,
+                  horizon,
+                  fromDate: today,
+                  log: opts.log
+              });
+              const row = sim.days.find(d => d.date === day);
+              return row ? row.usedByBuyers : 0;
+          },
+          freeTrainsOnDate(dateStr, state, opts) {
+              opts = opts || {};
+              const day = String(dateStr || '').slice(0, 10);
+              const { base, stars, trainerBonus } = this.dailyTrainBudget(state);
+              const today = new Date().toISOString().slice(0, 10);
+              if (day && day >= today) {
+                  const horizon = Math.max(1, this.daysBetweenIso(today, day) + 1);
+                  const sim = this.simulateBuyerSchedule(state, {
+                      excludeId: opts.excludeId,
+                      horizon,
+                      fromDate: today,
+                      log: opts.log
+                  });
+                  const row = sim.days.find(d => d.date === day);
+                  const reserved = row ? row.usedByBuyers : 0;
+                  return {
+                      base,
+                      stars,
+                      trainerBonus,
+                      reserved,
+                      free: Math.max(0, base - reserved),
+                      allocs: row ? row.allocs : []
+                  };
+              }
+              const reserved = this.reservedTrainsOnDate(day, Object.assign({}, opts, { state }));
+              return {
+                  base,
+                  stars,
+                  trainerBonus,
+                  reserved,
+                  free: Math.max(0, base - reserved),
+                  allocs: []
+              };
+          },
+          dailyTrainBudget(state) {
+              const stars = parseInt(state?.profile?.rating || 0, 10) || 0;
+              const positions = (typeof CompanyData !== 'undefined' && CompanyData.positions)
+                  ? (CompanyData.positions(state?.typeName) || {})
+                  : {};
+              let trainerBonus = 0;
+              for (const emp of Object.values(state?.employees || {})) {
+                  const res = (typeof PosNorm !== 'undefined' && PosNorm.resolve)
+                      ? PosNorm.resolve(emp.position, positions)
+                      : null;
+                  if (res?.data?.special === 'trainer') {
+                      const eff = emp.effectiveness?.working_stats || 0;
+                      if (typeof TCM !== 'undefined') {
+                          if (eff >= TCM.EE_TIER_4) trainerBonus += 3;
+                          else if (eff >= TCM.EE_TIER_3) trainerBonus += 2;
+                          else if (eff >= TCM.EE_TIER_2) trainerBonus += 1;
+                      }
+                  }
+              }
+              const base = Math.min(20, Math.max(0, stars)) + trainerBonus;
+              return { base, stars, trainerBonus };
+          },
+          freeTrainsOnDate(dateStr, state, opts) {
+              const { base, stars, trainerBonus } = this.dailyTrainBudget(state);
+              const reserved = this.reservedTrainsOnDate(dateStr, opts);
+              return {
+                  base,
+                  stars,
+                  trainerBonus,
+                  reserved,
+                  free: Math.max(0, base - reserved)
+              };
           },
 
   getOverrides() { return this.get('overrides', {}); },
@@ -2365,7 +2649,7 @@ function runCapture() {
                           _seen2.add(_k2); return true;
                       }).sort((a, b) => (a.ts || 0) - (b.ts || 0));
                       const _done = _entries.length;
-                      const _remaining = Math.max(0, c.totalTrains - _done);
+                      const _remaining = Storage.isOpenEndedContract(c) ? null : Math.max(0, (c.totalTrains || 0) - _done);
                       const _endDate = (_remaining === 0 || c.active === false) && _entries.length > 0 ? _entries[_entries.length - 1].date : '—';
 
                       let _rowColor;
@@ -7734,7 +8018,7 @@ if (_lowestNext) {
                       _earnF = _doneF * _ppt;
                   }
                       const _isActive = c.active !== false;
-                      const _isComplete = _doneF >= (c.totalTrains || 0);
+                      const _isComplete = !Storage.isOpenEndedContract(c) && (c.totalTrains || 0) > 0 && _doneF >= (c.totalTrains || 0);
                       return { ...c, done: _doneF, remaining: _remF, earned: _earnF, isActive: _isActive, isComplete: _isComplete };
                   });
                   const _totalEarnF  = _allConF.reduce((s, c) => s + c.earned, 0);
@@ -7743,7 +8027,9 @@ if (_lowestNext) {
                   const _rowsF = _allConF.map(c => {
                       const _pctF  = c.totalTrains > 0 ? Math.min(100, Math.round((c.done / c.totalTrains) * 100)) : 100;
                       const _scolF = c.isComplete ? '#7eb8ff' : c.isActive ? '#7eb8ff' : '#888';
-                      const _slblF = c.isComplete ? `✓ ${c.done}/${c.totalTrains}` : c.isActive ? `${c.done}/${c.totalTrains} · ${c.remaining} left` : `Closed (${c.done}/${c.totalTrains})`;
+                      const _slblF = Storage.isOpenEndedContract(c)
+                          ? (c.isActive ? `${c.done} trains · open-ended` : `Closed (${c.done} trains)`)
+                          : (c.isComplete ? `✓ ${c.done}/${c.totalTrains}` : c.isActive ? `${c.done}/${c.totalTrains} · ${c.remaining} left` : `Closed (${c.done}/${c.totalTrains})`);
                       const _enF   = (state.employees?.[c.buyerEmpId]?.name) || c.buyerName || c.buyerEmpId;
   const _dailyF = c.dailyReservation > 0 ? ` <span style="font-size:10px;color:#f59e0b;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);border-radius:2px;padding:1px 4px;">×${c.dailyReservation}/day</span>` : '';
   const _payBadgeF = c.payStatus === 'full'
@@ -8163,12 +8449,14 @@ const totalTrainBudget = baseTrains + trainerBonus;
 
               const activeSales = Storage.getTrainSales().filter(c => c.active !== false && (c.dailyReservation || 0) > 0);
               const saleLog = Storage.getTrainedLog();
+              // Only count reservations that apply *today* (respect start dates + remaining trains)
               const buyerAllocations = activeSales.map(c => {
+                  const reservedToday = Storage.contractReservationOnDate(c, today, saleLog);
+                  if (reservedToday <= 0) return null;
                   const todayCount = (saleLog[c.buyerEmpId] || []).filter(e => e.ts && e.ts >= _tornDayStartMs).length;
-                  const reserved = c.dailyReservation || 0;
-                  const done = todayCount >= reserved;
-                  return { empId: c.buyerEmpId, name: c.buyerName, reserved, todayCount, done };
-}).filter(b => employees[b.empId] && (employees[b.empId].days_in_company == null || employees[b.empId].days_in_company >= (Storage.getSettings().settlingInDays ?? 3)));
+                  const done = todayCount >= reservedToday;
+                  return { empId: c.buyerEmpId, name: c.buyerName, reserved: reservedToday, todayCount, done, contractId: c.id };
+              }).filter(Boolean).filter(b => employees[b.empId] && (employees[b.empId].days_in_company == null || employees[b.empId].days_in_company >= (Storage.getSettings().settlingInDays ?? 3)));
 
               const totalReserved = buyerAllocations.reduce((s, b) => s + b.reserved, 0);
               const trainBudget = Math.max(0, totalTrainBudget - totalReserved);
@@ -8722,15 +9010,23 @@ return {
                   const weekBuyerSimRemaining = {};
                   weekBuyerSales.forEach(c => {
                       const entries = (Storage.getTrainedLog()[c.buyerEmpId] || []).filter(e => e.date >= c.startDate);
-                      weekBuyerSimRemaining[c.id] = Math.max(0, c.totalTrains - entries.length);
+                      weekBuyerSimRemaining[c.id] = Storage.isOpenEndedContract(c) ? 9999 : Math.max(0, (c.totalTrains || 0) - entries.length);
                   });
                   const weekBuyerDayAllocs = [];
                   for (let d = 0; d < 7; d++) {
+                      const dayIso = new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
                       const dayAllocs = {};
                       weekBuyerSales.forEach(c => {
-                          const trains = Math.min(c.dailyReservation || 0, weekBuyerSimRemaining[c.id] || 0);
+                          const st = (c.startDate || '').slice(0, 10);
+                          if (st && dayIso < st) return;
+                          const left = weekBuyerSimRemaining[c.id] || 0;
+                          if (!(left > 0)) return;
+                          const trains = Math.min(c.dailyReservation || 0, left);
+                          if (trains <= 0) return;
                           dayAllocs[c.buyerEmpId] = (dayAllocs[c.buyerEmpId] || 0) + trains;
-                          weekBuyerSimRemaining[c.id] = Math.max(0, (weekBuyerSimRemaining[c.id] || 0) - trains);
+                          if (left !== 9999) {
+                              weekBuyerSimRemaining[c.id] = Math.max(0, left - trains);
+                          }
                       });
                       weekBuyerDayAllocs.push(dayAllocs);
                   }
@@ -12957,9 +13253,12 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   }
               }
               const _activeSalesH = Storage.getTrainSales().filter(c => c.active !== false && (c.dailyReservation || 0) > 0);
-              const totalReserved = _activeSalesH.reduce((s, c) => s + (c.dailyReservation || 0), 0);
               const _rawBudget = Math.min(20, stars) + trainerBonus;
-  const trainBudget = Math.max(0, _rawBudget - totalReserved);
+              // Today only — do not count future-start or already-finished contract days
+              const _todayIso = new Date().toISOString().slice(0, 10);
+              const _todayAvail = Storage.freeTrainsOnDate(_todayIso, state, {});
+              const totalReserved = _todayAvail.reserved || 0;
+              const trainBudget = Math.max(0, _rawBudget - totalReserved);
               const _rotExclHandler = new Set(Storage.getRotation().excluded || []);
               const nonDirIds = Object.keys(employees || {}).filter(id =>
                   employees[id].position !== 'Director'
@@ -12978,22 +13277,44 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
       return true;
   });
       const done = entries.length;
-                  const remaining = Math.max(0, c.totalTrains - done);
-                  const cashEarned = done * c.pricePerTrain;
-                  const cashRemaining = remaining * c.pricePerTrain;
-                  const totalValue = c.totalTrains * c.pricePerTrain;
+                  const openEnded = Storage.isOpenEndedContract(c);
+                  const totalTrainsN = openEnded ? 0 : (Number(c.totalTrains) || 0);
+                  const remaining = openEnded ? null : Math.max(0, totalTrainsN - done);
+                  const ppt = Number(c.pricePerTrain) || 0;
+                  const cashEarned = done * ppt;
+                  const cashRemaining = openEnded ? null : ((remaining || 0) * ppt);
+                  const totalValue = openEnded ? null : (totalTrainsN * ppt);
+                  const payments = Storage.getContractPayments(c);
+                  const amountPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                  const balanceDue = cashEarned - amountPaid;
                   const week7 = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
                   const recentEntries = entries.filter(e => e.date >= week7);
                   const dailyRate = recentEntries.length / 7;
 
                   const effectiveRate = (c.dailyReservation > 0) ? c.dailyReservation : dailyRate;
-                  const daysToComplete = effectiveRate > 0 ? Math.ceil(remaining / effectiveRate) : null;
-                  return { ...c, done, remaining, cashEarned, cashRemaining, totalValue, daysToComplete, dailyRate: effectiveRate };
+                  const daysToComplete = (!openEnded && remaining != null && effectiveRate > 0)
+                      ? Math.ceil(remaining / effectiveRate) : null;
+                  return {
+                      ...c,
+                      openEnded,
+                      totalTrains: openEnded ? 0 : totalTrainsN,
+                      done,
+                      remaining,
+                      cashEarned,
+                      cashRemaining,
+                      totalValue,
+                      payments,
+                      amountPaid,
+                      balanceDue,
+                      daysToComplete,
+                      dailyRate: effectiveRate
+                  };
               });
 
              const activeContracts  = contracts.filter(c => c.active !== false && !c.deleted);
               const archivedContracts = contracts.filter(c => c.active === false && !c.deleted);
-              const reservedPerDay   = activeContracts.reduce((s, c) => s + (c.dailyReservation || 0), 0);
+              // Reserved/free for *today* (same numbers as 7-day schedule row 1)
+              const reservedPerDay   = totalReserved;
               const freeTrains       = trainBudget;
 
               const empOptions = Object.entries(employees || {})
@@ -13006,9 +13327,9 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
 
               html += `<div class="tcm-card"><div class="tcm-card-body">
                   <div class="tcm-row"><span class="lbl">Daily train budget</span><span class="val">${_rawBudget} <span style="font-size:10px;color:#888;">(${Math.min(20, stars)}★ + ${trainerBonus} trainer bonus)</span></span></div>
-      <div class="tcm-row"><span class="lbl">Reserved for buyers</span><span class="val ${reservedPerDay > _rawBudget ? 'red' : 'amber'}">${reservedPerDay}</span></div>
-     <div class="tcm-row"><span class="lbl">Free for rotation</span><span class="val ${freeTrains === 0 ? 'red' : 'green'}">${freeTrains} trains · ${N} employees</span></div>
-                  ${reservedPerDay > _rawBudget ? `<div class="tcm-warn-box" style="margin-top:6px;">⚠ Over-reserved by ${reservedPerDay - _rawBudget} trains/day — reduce daily reservations below.</div>` : ''}
+      <div class="tcm-row"><span class="lbl">Reserved for buyers <span style="font-size:10px;color:#666;font-weight:400;">(today)</span></span><span class="val ${reservedPerDay > _rawBudget ? 'red' : 'amber'}">${reservedPerDay}</span></div>
+     <div class="tcm-row"><span class="lbl">Free for rotation <span style="font-size:10px;color:#666;font-weight:400;">(today)</span></span><span class="val ${freeTrains === 0 ? 'red' : 'green'}">${freeTrains} trains · ${N} employees</span></div>
+                  ${reservedPerDay > _rawBudget ? `<div class="tcm-warn-box" style="margin-top:6px;">⚠ Today over-reserved by ${reservedPerDay - _rawBudget} trains — reduce daily reservations on contracts active today.</div>` : ''}
               </div></div>`;
 
 
@@ -13017,7 +13338,7 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   html += `<div class="tcm-notice">No active contracts. Add one below.</div>`;
               }
               activeContracts.forEach(c => {
-                  const pct    = Math.min(100, c.totalTrains > 0 ? Math.round((c.done / c.totalTrains) * 100) : 0);
+                  const pct    = c.openEnded ? 0 : Math.min(100, c.totalTrains > 0 ? Math.round((c.done / c.totalTrains) * 100) : 0);
                   const barCls = pct >= 100 ? '' : pct >= 50 ? 'amber' : 'red';
                   const empName = employees[c.buyerEmpId]?.name || c.buyerName;
                   html += `<div class="tcm-card" style="margin-bottom:8px;"><div class="tcm-card-body">
@@ -13044,24 +13365,57 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                                   color:#ef4444;border-radius:3px;padding:2px 7px;cursor:pointer;font-size:11px;">✕</button>
                           </div>
                       </div>
-                      <div class="tcm-row"><span class="lbl">Contract</span><span class="val">${c.totalTrains} trains @ ${Calc.fmtCash(c.pricePerTrain)} each</span></div>
-                      <div class="tcm-row"><span class="lbl">Total value</span><span class="val">${Calc.fmtCash(c.totalValue)}</span></div>
-                      <div class="tcm-row"><span class="lbl">Progress</span><span class="val green">${c.done} / ${c.totalTrains} trains (${pct}%)</span></div>
-                      <div style="margin:4px 0 8px;">
+                      <div class="tcm-row"><span class="lbl">Contract</span><span class="val">${c.openEnded
+                          ? ('Open-ended · ' + Calc.fmtCash(c.pricePerTrain) + '/train')
+                          : (c.totalTrains + ' trains @ ' + Calc.fmtCash(c.pricePerTrain) + ' each')}</span></div>
+                      ${c.openEnded
+                          ? '<div class="tcm-row"><span class="lbl">Type</span><span class="val" style="color:#a78bfa;">Long-term / no fixed total</span></div>'
+                          : ('<div class="tcm-row"><span class="lbl">Total value</span><span class="val">' + Calc.fmtCash(c.totalValue) + '</span></div>')}
+                      <div class="tcm-row"><span class="lbl">Progress</span><span class="val green">${c.openEnded
+                          ? (c.done + ' trains delivered')
+                          : (c.done + ' / ' + c.totalTrains + ' trains (' + pct + '%)')}</span></div>
+                      ${c.openEnded ? '' : `<div style="margin:4px 0 8px;">
                           <div class="tcm-bar" style="width:100%;height:6px;">
                               <div class="tcm-bar-fill ${barCls}" style="width:${pct}%;"></div>
                           </div>
-                      </div>
-                      ${c.prepaidAmount > 0 ? `<div class="tcm-row"><span class="lbl">Prepaid (at start)</span><span class="val" style="color:#a78bfa;">${Calc.fmtCash(c.prepaidAmount)}</span></div>` : ''}
-                      <div class="tcm-row"><span class="lbl">Used Train Value</span><span class="val green">${Calc.fmtCash(c.cashEarned)}</span></div>
-                      <div class="tcm-row"><span class="lbl">Remaining Train Value</span><span class="val amber">${Calc.fmtCash(c.cashRemaining)}</span></div>
-                      ${c.daysToComplete !== null
+                      </div>`}
+                      <div class="tcm-row"><span class="lbl">Used train value</span><span class="val green">${Calc.fmtCash(c.cashEarned)}</span></div>
+                      <div class="tcm-row"><span class="lbl">Payments received</span><span class="val" style="color:#a78bfa;">${Calc.fmtCash(c.amountPaid || 0)}</span></div>
+                      <div class="tcm-row"><span class="lbl">Balance (delivered − paid)</span><span class="val ${(c.balanceDue||0) > 0 ? 'amber' : (c.balanceDue||0) < 0 ? 'green' : ''}">${(c.balanceDue||0) > 0 ? Calc.fmtCash(c.balanceDue) + ' due' : (c.balanceDue||0) < 0 ? Calc.fmtCash(-(c.balanceDue||0)) + ' credit' : Calc.fmtCash(0)}</span></div>
+                      ${!c.openEnded ? `<div class="tcm-row"><span class="lbl">Remaining train value</span><span class="val amber">${Calc.fmtCash(c.cashRemaining)}</span></div>` : ''}
+                      ${!c.openEnded && c.daysToComplete !== null
                           ? `<div class="tcm-row"><span class="lbl">Est. completion</span><span class="val">${c.daysToComplete}d at ${c.dailyRate.toFixed(1)} trains/day</span></div>`
-                          : `<div class="tcm-row"><span class="lbl">Est. completion</span><span class="val" style="color:#888;">Not enough data yet</span></div>`}
+                          : (!c.openEnded ? `<div class="tcm-row"><span class="lbl">Est. completion</span><span class="val" style="color:#888;">Not enough data yet</span></div>` : '')}
+                      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a2a2a;">
+                          <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Payments over time</div>
+                          ${(c.payments && c.payments.length) ? c.payments.slice().sort((a,b) => String(a.date).localeCompare(String(b.date))).map(p =>
+                              `<div class="tcm-row" style="font-size:11px;">
+                                  <span class="lbl">${p.date || '—'} ${p.note ? ('· ' + p.note) : ''}</span>
+                                  <span class="val" style="color:#a78bfa;">${Calc.fmtCash(p.amount)}
+                                      <button type="button" class="tcm-sale-del-pay" data-id="${c.id}" data-payid="${p.id}"
+                                          style="margin-left:6px;background:transparent;border:none;color:#f66;cursor:pointer;font-size:11px;" title="Remove payment">✕</button>
+                                  </span>
+                              </div>`
+                          ).join('') : '<div style="font-size:11px;color:#666;margin-bottom:6px;">No payments recorded yet.</div>'}
+                          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:end;margin-top:6px;">
+                              <div>
+                                  <div style="font-size:10px;color:#888;margin-bottom:2px;">Amount</div>
+                                  <input class="tcm-input tcm-sale-pay-amt" data-id="${c.id}" type="text" inputmode="numeric" placeholder="0" style="width:100%;box-sizing:border-box;font-size:12px;padding:4px 6px;" />
+                              </div>
+                              <div>
+                                  <div style="font-size:10px;color:#888;margin-bottom:2px;">Date</div>
+                                  <input class="tcm-input tcm-sale-pay-date" data-id="${c.id}" type="date" value="${today}" style="width:100%;box-sizing:border-box;font-size:12px;padding:4px 6px;" />
+                              </div>
+                              <button type="button" class="tcm-btn tcm-sale-add-pay" data-id="${c.id}" style="font-size:11px;padding:5px 10px;">+ Pay</button>
+                          </div>
+                          <div style="margin-top:4px;">
+                              <input class="tcm-input tcm-sale-pay-note" data-id="${c.id}" type="text" placeholder="Note (optional)" style="width:100%;box-sizing:border-box;font-size:11px;padding:3px 6px;" />
+                          </div>
+                      </div>
                       <div class="tcm-row" style="margin-top:4px;">
                           <span class="lbl">Daily trains</span>
                           <div style="display:flex;align-items:center;gap:6px;">
-                              <input type="number" min="0" max="${trainBudget}" value="${c.dailyReservation || 0}"
+                              <input type="number" min="0" max="${_rawBudget}" value="${c.dailyReservation || 0}"
                                   class="tcm-input tcm-sale-reservation" data-id="${c.id}"
                                   style="width:55px;padding:3px 6px;font-size:12px;" />
                               <span style="font-size:11px;color:#888;">trains/day</span>
@@ -13077,26 +13431,29 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   html += `<div class="tcm-section-label" style="margin-top:4px;">7-Day Schedule</div>
                   <div class="tcm-notice" style="font-size:11px;">How trains split between buyers and regular rotation each day. Adjust daily reservations above to change the balance.</div>`;
 
-                  const days = [];
-
-              const simRemaining = {};
-              activeContracts.forEach(c => { simRemaining[c.id] = c.remaining; });
-              for (let d = 0; d < 7; d++) {
-                  const dayLabel = new Date(Date.now() + d * 86400000)
-                      .toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                  const buyerAllocs = activeContracts
-                      .filter(c => simRemaining[c.id] > 0)
-                      .map(c => {
-                          const trains = Math.min(c.dailyReservation || 0, simRemaining[c.id]);
-                          return { name: employees[c.buyerEmpId]?.name || c.buyerName, trains, contractId: c.id };
-                      })
-                      .filter(b => b.trains > 0);
-
-                  buyerAllocs.forEach(b => { simRemaining[b.contractId] = Math.max(0, simRemaining[b.contractId] - b.trains); });
-                  const usedByBuyers   = buyerAllocs.reduce((s, b) => s + b.trains, 0);
-      const rotationTrains = Math.max(0, _rawBudget - usedByBuyers);
-      days.push({ dayLabel, buyerAllocs, usedByBuyers, rotationTrains, isToday: d === 0 });
-              }
+                  const _sim = Storage.simulateBuyerSchedule(state, { horizon: 7 });
+                  const days = _sim.days.map((row, d) => {
+                      const dayDate = new Date(row.date + 'T12:00:00Z');
+                      const dayLabel = dayDate.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', timeZone: 'UTC' });
+                      const buyerAllocs = row.allocs.map(a => ({
+                          name: (employees[a.id] ? null : null) || a.name,
+                          trains: a.trains,
+                          contractId: a.id
+                      })).map(a => {
+                          // Prefer live employee name when we can resolve buyer from contract
+                          const c = activeContracts.find(x => x.id === a.contractId);
+                          const nm = c ? (employees[c.buyerEmpId]?.name || c.buyerName || a.name) : a.name;
+                          return { name: nm, trains: a.trains, contractId: a.contractId };
+                      });
+                      return {
+                          dayLabel,
+                          dayIso: row.date,
+                          buyerAllocs,
+                          usedByBuyers: row.usedByBuyers,
+                          rotationTrains: row.rotationTrains,
+                          isToday: d === 0
+                      };
+                  });
 
                   html += `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
                       <thead><tr>
@@ -13132,8 +13489,12 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   </div>
                   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
               <div>
-                  <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Total trains</div>
+                  <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Total trains <span style="color:#666;font-weight:400;">(fixed deals)</span></div>
                   <input class="tcm-input" id="sale-trains" type="number" min="1" placeholder="e.g. 20" style="width:100%;box-sizing:border-box;"/>
+                  <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:#ccc;cursor:pointer;">
+                      <input type="checkbox" id="sale-open-ended" style="accent-color:#7eb8ff;cursor:pointer;" />
+                      Open-ended / long-term (no fixed total)
+                  </label>
               </div>
              <div>
                   <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Pricing method</div>
@@ -13158,7 +13519,8 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                      <div style="margin-bottom:8px;">
                       <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Daily trains <span style="color:#4b5563;font-weight:400;">(optional)</span></div>
                       <input class="tcm-input" id="sale-reservation" type="number" min="0" placeholder="Leave blank to not reserve" style="width:100%;box-sizing:border-box;"/>
-                      <div style="font-size:11px;color:#4b5563;margin-top:3px;">If set, this many trains will be reserved for this buyer each day in the Training tab rotation.</div>
+                      <div style="font-size:11px;color:#4b5563;margin-top:3px;">If set, this many trains will be reserved for this buyer each day from the start date, only while the contract still has trains left.</div>
+                      <div id="sale-avail-hint" style="font-size:11px;color:#7eb8ff;margin-top:4px;"></div>
                   </div>
                       <div>
                           <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Start date</div>
@@ -13167,10 +13529,11 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   </div>
                   <div style="margin-bottom:10px;">
                       <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Notes (optional)</div>
-                      <input class="tcm-input" id="sale-notes" type="text" placeholder="e.g. paid upfront, friend deal" style="width:100%;box-sizing:border-box;"/>
+                      <input class="tcm-input" id="sale-notes" type="text" placeholder="e.g. weekly payments, friend deal, open-ended" style="width:100%;box-sizing:border-box;"/>
                   </div>
                   <div style="margin-bottom:10px;padding:8px;background:rgba(126,184,255,0.05);border:1px solid rgba(126,184,255,0.15);border-radius:4px;">
-                      <div style="font-size:12px;color:#9ca3af;margin-bottom:6px;font-weight:600;">Payment status at start</div>
+                      <div style="font-size:12px;color:#9ca3af;margin-bottom:6px;font-weight:600;">Initial payment (optional)</div>
+                      <div style="font-size:10px;color:#666;margin-bottom:6px;">You can add more payments anytime on the active contract card.</div>
                       <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;cursor:pointer;margin-bottom:6px;">
                           <input type="radio" name="sale-pay-status" id="sale-pay-unpaid" value="unpaid" checked style="cursor:pointer;"/>
                           Not paid yet
@@ -13196,11 +13559,11 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
       html += `<div class="tcm-section-label" style="margin-top:8px;">Archived (${archivedContracts.length})</div>`;
       archivedContracts.forEach(c => {
           const empName = employees[c.buyerEmpId]?.name || c.buyerName;
-          const isComplete = c.done >= c.totalTrains;
-          const hasPartial = c.done > 0 && c.done < c.totalTrains;
+          const isComplete = !c.openEnded && (c.totalTrains || 0) > 0 && c.done >= c.totalTrains;
+          const hasPartial = c.done > 0 && (c.openEnded || c.done < (c.totalTrains || 0));
           const borderColor = isComplete ? 'rgba(126,184,255,0.4)' : hasPartial ? 'rgba(245,158,11,0.4)' : 'rgba(239,68,68,0.4)';
           const textColor   = isComplete ? '#7eb8ff' : hasPartial ? '#f59e0b' : '#ef4444';
-          const statusLabel = isComplete ? '✓ Paid in full' : hasPartial ? `${c.done}/${c.totalTrains} trains` : '0 trains done';
+          const statusLabel = isComplete ? '✓ Paid in full' : hasPartial ? (c.openEnded ? `${c.done} trains delivered` : `${c.done}/${c.totalTrains} trains`) : '0 trains done';
           html += `<div style="padding:8px 12px;margin-bottom:5px;background:#0a0e14;border:1px solid ${borderColor};border-radius:4px;display:flex;justify-content:space-between;align-items:center;">
               <div>
                   <span style="font-size:13px;color:${textColor};font-weight:700;">${empName}</span>
@@ -13233,6 +13596,23 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   }
               }
               const _tsDailyBudget = Math.min(20, _tsStars) + _tsTrainerBonus;
+
+              
+              const _refreshSaleAvailHint = () => {
+                  const el = document.getElementById('sale-avail-hint');
+                  if (!el) return;
+                  const day = document.getElementById('sale-startdate')?.value || new Date().toISOString().slice(0, 10);
+                  const want = parseInt(document.getElementById('sale-reservation')?.value || '0', 10) || 0;
+                  const avail = Storage.freeTrainsOnDate(day, state, {});
+                  const ok = want <= 0 || want <= avail.free;
+                  el.style.color = ok ? '#7eb8ff' : '#f88';
+                  const who = (avail.allocs || []).map(a => `${a.name}×${a.trains}`).join(' + ') || 'none';
+                  el.textContent = `${day}: budget ${avail.base}/day · reserved ${avail.reserved} (${who}) · free ${avail.free}` +
+                      (want > 0 ? (ok ? ` · reservation ${want} OK` : ` · need ${want} but only ${avail.free} free`) : '');
+              };
+              document.getElementById('sale-startdate')?.addEventListener('change', _refreshSaleAvailHint);
+              document.getElementById('sale-reservation')?.addEventListener('input', _refreshSaleAvailHint);
+              _refreshSaleAvailHint();
 
               const priceInput = document.getElementById('sale-price');
               priceInput?.addEventListener('input', () => {
@@ -13306,21 +13686,55 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   } else {
                       price = parseInt((document.getElementById('sale-price')?.value || '0').replace(/,/g, ''));
                   }
-                  const reservation = parseInt(document.getElementById('sale-reservation')?.value || '0');
+                  let reservation = parseInt(document.getElementById('sale-reservation')?.value || '0', 10) || 0;
                   const startDate  = document.getElementById('sale-startdate')?.value || new Date().toISOString().slice(0, 10);
                   const notes      = document.getElementById('sale-notes')?.value?.trim() || '';
 
                  if (!empId)           { alert('Select an employee.'); return; }
-                  if (!trains || trains < 1) { alert('Enter total trains.'); return; }
+                  const openEnded = !!document.getElementById('sale-open-ended')?.checked;
+                  if (!openEnded && (!trains || trains < 1)) { alert('Enter total trains, or check Open-ended.'); return; }
                   if (!price  || price  < 1) { alert('Enter price per train.'); return; }
+                  // Open-ended deals need a daily reservation so the schedule can place them
+                  if (openEnded && reservation < 1) {
+                      alert('Open-ended contracts need Daily trains set (e.g. 3/day) so the 7-day schedule can reserve them.');
+                      return;
+                  }
+                  // Fixed deal with no daily rate → default to delivering the full total on the start day
+                  if (!openEnded && reservation < 1 && trains > 0) {
+                      reservation = trains;
+                  }
                   if (reservation > 0) {
-                      const _curReserved = Storage.getTrainSales()
-                          .filter(c => c.active !== false && (c.dailyReservation || 0) > 0)
-                          .reduce((s, c) => s + (c.dailyReservation || 0), 0);
-                      if (_curReserved + reservation > _tsDailyBudget) {
-                          const _maxAllowed = Math.max(0, _tsDailyBudget - _curReserved);
-                          alert(`Cannot reserve ${reservation} trains/day.\nDaily budget: ${_tsDailyBudget} trains (${_tsStars}★ + ${_tsTrainerBonus} trainer bonus).\nAlready reserved by other contracts: ${_curReserved}/day.\nMaximum you can reserve: ${_maxAllowed}.`);
+                      const _avail = Storage.freeTrainsOnDate(startDate, state, {});
+                      if (reservation > _avail.free) {
+                          alert(
+                              `Cannot reserve ${reservation} trains/day on ${startDate}.\n` +
+                              `Daily budget: ${_avail.base} (${_avail.stars}★ + ${_avail.trainerBonus} trainer).\n` +
+                              `Already reserved that day: ${_avail.reserved}.\n` +
+                              `Free that day: ${_avail.free}.\n` +
+                              `Maximum you can reserve: ${_avail.free}.`
+                          );
                           return;
+                      }
+                      // Fixed contracts: ensure enough free capacity across the delivery window
+                      if (!openEnded && trains > 0) {
+                          let left = trains;
+                          let day = startDate;
+                          let guard = 0;
+                          while (left > 0 && guard < 5000) {
+                              const info = Storage.freeTrainsOnDate(day, state, {});
+                              const can = Math.min(reservation, info.free, left);
+                              if (can < 1) {
+                                  alert(
+                                      `Not enough free trains to deliver this contract.\n` +
+                                      `Stuck on ${day} with ${info.free} free (need ${Math.min(reservation, left)}/day).\n` +
+                                      `Reduce daily reservation, pick a later start date, or lower total trains.`
+                                  );
+                                  return;
+                              }
+                              left -= can;
+                              day = Storage.addDaysIso(day, 1);
+                              guard++;
+                          }
                       }
                   }
 
@@ -13328,20 +13742,40 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   const _partialAmt = _payStatus === 'partial'
                       ? parseInt((document.getElementById('sale-partial-amount')?.value || '0').replace(/,/g,'')) || 0
                       : 0;
-                  const _prepaid = _payStatus === 'full' ? trains * price : _partialAmt;
+                  const _totalForFull = openEnded ? 0 : (trains * price);
+                  const _prepaid = _payStatus === 'full'
+                      ? (_totalForFull || _partialAmt || 0)
+                      : _partialAmt;
+                  // For open-ended "paid in full" at start doesn't make sense without a total — treat as partial amount if given
+                  const _initPay = (_payStatus === 'full' && openEnded)
+                      ? (_partialAmt || 0)
+                      : _prepaid;
+
+                  const payments = [];
+                  if (_initPay > 0) {
+                      payments.push({
+                          id: 'p_' + Date.now(),
+                          amount: _initPay,
+                          date: startDate,
+                          note: _payStatus === 'full' && !openEnded ? 'Paid in full at start' : 'Initial payment',
+                          ts: Date.now()
+                      });
+                  }
 
                   const sales = Storage.getTrainSales();
                   sales.push({
                       id: Date.now().toString(),
                       buyerName: state.employees[empId]?.name || empId,
                       buyerEmpId: empId,
-                      totalTrains: trains,
+                      openEnded: openEnded,
+                      totalTrains: openEnded ? 0 : trains,
                       pricePerTrain: price,
                       dailyReservation: reservation,
                       startDate,
                       notes,
                       payStatus: _payStatus,
-                      prepaidAmount: _prepaid,
+                      prepaidAmount: _initPay,
+                      payments,
                       active: true
                   });
                   Storage.saveTrainSales(sales);
@@ -13352,12 +13786,20 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   input.addEventListener('change', () => {
                       const id  = input.dataset.id;
                       const val = Math.max(0, parseInt(input.value) || 0);
-                      const _otherReserved = Storage.getTrainSales()
-                          .filter(c => c.active !== false && c.id !== id && (c.dailyReservation || 0) > 0)
-                          .reduce((s, c) => s + (c.dailyReservation || 0), 0);
-                      if (val > 0 && _otherReserved + val > _tsDailyBudget) {
-                          const _maxAllowed = Math.max(0, _tsDailyBudget - _otherReserved);
-                          alert(`Cannot set ${val} trains/day — exceeds daily budget of ${_tsDailyBudget}.\nOther contracts: ${_otherReserved}/day. Maximum: ${_maxAllowed}.`);
+                      const sales0 = Storage.getTrainSales();
+                      const existing = sales0.find(s => s.id === id);
+                      const day = (existing && existing.startDate) || new Date().toISOString().slice(0, 10);
+                      // Probe free capacity excluding this contract, then check if `val` fits
+                      const probe = Object.assign({}, existing || {}, { dailyReservation: 0, id });
+                      // freeTrainsOnDate with excludeId is cleaner
+                      const avail = Storage.freeTrainsOnDate(day, state, { excludeId: id });
+                      if (val > 0 && val > avail.free) {
+                          const _maxAllowed = avail.free;
+                          alert(
+                              `Cannot set ${val} trains/day on ${day}.\n` +
+                              `Daily budget: ${avail.base}. Other contracts that day: ${avail.reserved}.\n` +
+                              `Maximum: ${_maxAllowed}.`
+                          );
                           input.value = _maxAllowed;
                           return;
                       }
@@ -13383,8 +13825,13 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
                               <div>
                                   <div style="font-size:11px;color:#9ca3af;margin-bottom:3px;">Total trains</div>
-                                  <input type="number" id="${editorId}-trains" value="${c.totalTrains}" min="1"
+                                  <input type="number" id="${editorId}-trains" value="${c.openEnded ? '' : (c.totalTrains || '')}" min="1"
+                                      ${c.openEnded ? 'disabled' : ''}
                                       style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #374151;border-radius:4px;color:#ddd;padding:4px 8px;font-size:13px;"/>
+                                  <label style="display:flex;align-items:center;gap:5px;margin-top:5px;font-size:11px;color:#ccc;cursor:pointer;">
+                                      <input type="checkbox" id="${editorId}-open" ${c.openEnded ? 'checked' : ''} style="accent-color:#7eb8ff;" />
+                                      Open-ended (no fixed total)
+                                  </label>
                               </div>
                               <div>
                                   <div style="font-size:11px;color:#9ca3af;margin-bottom:3px;">Price per train ($)</div>
@@ -13431,6 +13878,11 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                           _updateSummary();
                       });
                       document.getElementById(`${editorId}-trains`)?.addEventListener('input', _updateSummary);
+                      document.getElementById(`${editorId}-open`)?.addEventListener('change', (e) => {
+                          const te = document.getElementById(`${editorId}-trains`);
+                          if (te) te.disabled = !!e.target.checked;
+                          _updateSummary();
+                      });
                       _updateSummary();
 
                       document.getElementById(`${editorId}-cancel`)?.addEventListener('click', () => {
@@ -13443,11 +13895,24 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                           const newRes    = parseInt(document.getElementById(`${editorId}-reservation`)?.value) || 0;
                           const newDate   = document.getElementById(`${editorId}-startdate`)?.value || c.startDate;
                           const newNotes  = document.getElementById(`${editorId}-notes`)?.value?.trim() || '';
-                          if (!newTrains || !newPrice) { alert('Total trains and price per train are required.'); return; }
+                          const openEnded = !!document.getElementById(`${editorId}-open`)?.checked;
+                          if (!openEnded && (!newTrains || newTrains < 1)) { alert('Total trains required unless open-ended.'); return; }
+                          if (!newPrice) { alert('Price per train is required.'); return; }
+                          if (newRes > 0) {
+                              const avail = Storage.freeTrainsOnDate(newDate, state, { excludeId: cId });
+                              if (newRes > avail.free) {
+                                  alert(
+                                      `Cannot reserve ${newRes}/day on ${newDate}.\n` +
+                                      `Free that day: ${avail.free} (budget ${avail.base}, others ${avail.reserved}).`
+                                  );
+                                  return;
+                              }
+                          }
                           const updatedSales = Storage.getTrainSales();
                           const idx = updatedSales.findIndex(s => s.id === cId);
                           if (idx >= 0) {
-                              updatedSales[idx].totalTrains      = newTrains;
+                              updatedSales[idx].openEnded        = openEnded;
+                              updatedSales[idx].totalTrains      = openEnded ? 0 : newTrains;
                               updatedSales[idx].pricePerTrain    = newPrice;
                               updatedSales[idx].dailyReservation = newRes;
                               updatedSales[idx].startDate        = newDate;
@@ -13458,6 +13923,60 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                       });
                   });
               });
+              
+              document.getElementById('sale-open-ended')?.addEventListener('change', (e) => {
+                  const trainsEl = document.getElementById('sale-trains');
+                  if (trainsEl) {
+                      trainsEl.disabled = !!e.target.checked;
+                      trainsEl.placeholder = e.target.checked ? 'n/a — open-ended' : 'e.g. 20';
+                  }
+                  const fullLbl = document.getElementById('sale-pay-full')?.parentElement;
+                  if (fullLbl && e.target.checked) {
+                      fullLbl.style.opacity = '0.45';
+                  } else if (fullLbl) {
+                      fullLbl.style.opacity = '';
+                  }
+              });
+
+              document.querySelectorAll('.tcm-sale-add-pay').forEach(btn => {
+                  btn.addEventListener('click', () => {
+                      const id = btn.dataset.id;
+                      const amtEl = document.querySelector(`.tcm-sale-pay-amt[data-id="${id}"]`);
+                      const dateEl = document.querySelector(`.tcm-sale-pay-date[data-id="${id}"]`);
+                      const noteEl = document.querySelector(`.tcm-sale-pay-note[data-id="${id}"]`);
+                      const amount = parseInt(String(amtEl?.value || '').replace(/,/g, ''), 10) || 0;
+                      if (amount < 1) { alert('Enter a payment amount.'); return; }
+                      const date = dateEl?.value || new Date().toISOString().slice(0, 10);
+                      const note = (noteEl?.value || '').trim();
+                      const sales = Storage.getTrainSales();
+                      const idx = sales.findIndex(s => s.id === id);
+                      if (idx < 0) return;
+                      const c = sales[idx];
+                      const payments = Storage.getContractPayments(c);
+                      payments.push({ id: 'p_' + Date.now(), amount, date, note, ts: Date.now() });
+                      sales[idx].payments = payments;
+                      sales[idx].prepaidAmount = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                      Storage.saveTrainSales(sales);
+                      this._renderTab('calc');
+                  });
+              });
+
+              document.querySelectorAll('.tcm-sale-del-pay').forEach(btn => {
+                  btn.addEventListener('click', () => {
+                      const id = btn.dataset.id;
+                      const payId = btn.dataset.payid;
+                      if (!confirm('Remove this payment entry?')) return;
+                      const sales = Storage.getTrainSales();
+                      const idx = sales.findIndex(s => s.id === id);
+                      if (idx < 0) return;
+                      let payments = Storage.getContractPayments(sales[idx]).filter(p => String(p.id) !== String(payId));
+                      sales[idx].payments = payments;
+                      sales[idx].prepaidAmount = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                      Storage.saveTrainSales(sales);
+                      this._renderTab('calc');
+                  });
+              });
+
               document.querySelectorAll('.tcm-sale-paid').forEach(btn => {
       btn.addEventListener('click', () => {
           const sales = Storage.getTrainSales();
@@ -18528,18 +19047,24 @@ const cur = _srQueue[_srIdx];
               } else if (_mqMode === 'contract_rotational') {
                   const _crRot = Storage.getRotation();
                   const _crExcl = new Set(_crRot.excluded || []);
+                  const _crToday = new Date().toISOString().slice(0, 10);
                   const _crSales = Storage.getTrainSales().filter(c => {
                       if (c.active === false || !_mqEmps[c.buyerEmpId] || _crExcl.has(c.buyerEmpId)) return false;
+                      // Must actually reserve something *today*
+                      const _resToday = Storage.contractReservationOnDate(c, _crToday, _mqTodayLog);
+                      if (_resToday <= 0) return false;
+                      if (Storage.isOpenEndedContract(c)) return true;
                       const _cl = (_mqTodayLog[c.buyerEmpId] || []).filter(e => e.ts && e.date >= (c.startDate || ''));
                       const _cs = new Set();
-                      return _cl.filter(e => { if (_cs.has(e.ts)) return false; _cs.add(e.ts); return true; }).length < c.totalTrains;
+                      const _done = _cl.filter(e => { if (_cs.has(e.ts)) return false; _cs.add(e.ts); return true; }).length;
+                      return _done < (Number(c.totalTrains) || 0);
                   });
                   const _crBuyerIds = _crSales.filter(c => {
                       const done = _mqDoneToday(c.buyerEmpId);
-                      const lim = c.dailyReservation || 0;
+                      const lim = Storage.contractReservationOnDate(c, _crToday, _mqTodayLog) || (c.dailyReservation || 0);
                       return lim === 0 ? done === 0 : done < lim;
                   }).map(c => c.buyerEmpId);
-                  const _crReserved = _crSales.reduce((s, c) => s + (c.dailyReservation || 0), 0);
+                  const _crReserved = _crSales.reduce((s, c) => s + (Storage.contractReservationOnDate(c, _crToday, _mqTodayLog) || 0), 0);
                   const _crBudget = Math.max(0, (_mqAppState?.detailed?.trains_available ?? 0) - _crReserved);
                   const _crQ = Storage.getTrainQueue(_mqEmps, _crBudget, 'rotational', _mqDirId, _mqAppState?.todayNews, _mqAppState?.typeName);
                   const _crRotIds = _crQ.today.filter(e => !e.done && e.scheduled).map(e => e.empId);
