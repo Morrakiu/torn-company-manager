@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.8.5-alpha
+// @version      10.8.6-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -21,7 +21,6 @@
 // @connect      api.jsonbin.io
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @connect      greasyfork.org
 // @run-at       document-idle
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
@@ -6610,11 +6609,11 @@ const _catForTab = { overview:'management', finance:'management', stock:'managem
                   New version <strong style="color:#fff;">v${v}</strong> is out
                   (you have v${TCM.VERSION}).
                 </span>
-                <a href="https://greasyfork.org/en/scripts/570613" target="_blank"
+                <a href="https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Alpha" target="_blank"
                    style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.5);
                    color:#f59e0b;border-radius:4px;padding:5px 10px;font-weight:700;font-size:12px;
                    text-decoration:none;white-space:nowrap;">
-                  ⬡ Update on GreasyFork →
+                  ⬡ Update on GitHub →
                 </a>
                 <button id="tcm-update-snooze" style="background:rgba(75,85,99,0.4);border:1px solid #374151;
                   color:#9ca3af;border-radius:4px;padding:5px 8px;cursor:pointer;font-size:11px;white-space:nowrap;">
@@ -18990,53 +18989,11 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
 
 
       function _checkForUpdates() {
-          const _toNum = v => (v || '0').split('.').map(Number)
-              .reduce((a, b, i) => a + b * Math.pow(1000, 2 - i), 0);
-          const _apply = (latest) => {
-              latest = (latest || '').toString().trim();
-              if (!latest) return false;
-              console.log(`[TCM] Update check: current=${TCM.VERSION} latest=${latest}`);
-              if (_toNum(latest) > _toNum(TCM.VERSION)) {
-                  GM_setValue('TCM_update_available', latest);
-                  if (GM_getValue('TCM_update_dismissed_v', '') !== latest) GM_setValue('TCM_update_dismissed_v', '');
-                  _showUpdateBanner(latest);
-                  return true;
-              }
-              GM_setValue('TCM_update_available', '');
-              console.log('[TCM] Update check: already on latest');
-              return false;
-          };
-          GM_xmlhttpRequest({
-              method: 'GET',
-              url: 'https://update.greasyfork.org/scripts/570613/Torn%20Company%20Manager.meta.js',
-              timeout: 10000,
-              onload(res) {
-                  try {
-                      if (res.status < 200 || res.status >= 300) throw new Error('HTTP ' + res.status);
-                      const _vm = res.responseText.match(/@version\s+([\d.]+)/);
-                      if (_vm) { _apply(_vm[1]); return; }
-                      throw new Error('no @version tag in meta.js');
-                  } catch(e) {
-                      console.warn('[TCM] meta.js check failed, trying JSON:', e.message);
-                      GM_xmlhttpRequest({
-                          method: 'GET', url: 'https://greasyfork.org/scripts/570613.json', timeout: 10000,
-                          onload(r2) {
-                              try {
-                                  if (r2.status < 200 || r2.status >= 300) return;
-                                  const d = JSON.parse(r2.responseText);
-                                  _apply(d.version || (d.script && d.script.version) || '');
-                              } catch(e2) { console.warn('[TCM] JSON update check failed:', e2); }
-                          },
-                          onerror()   { console.warn('[TCM] Update check JSON: network error'); },
-                          ontimeout() { console.warn('[TCM] Update check JSON: timeout'); }
-                      });
-                  }
-              },
-              onerror()   { console.warn('[TCM] Update check meta.js: network error'); },
-              ontimeout() { console.warn('[TCM] Update check meta.js: timeout'); }
-          });
+          // GreasyFork update checks disabled — userscript updates via @updateURL (GitHub).
+          return;
       }
 
+      
       function _showUpdateBanner(latestVersion) {
           const _svCmp = vv => (vv||'0').split('.').map(Number).reduce((a,b,i)=>a+b*Math.pow(1000,2-i),0);
           if (_svCmp(latestVersion) <= _svCmp(TCM.VERSION)) { GM_setValue('TCM_update_pending_v', ''); return; }
