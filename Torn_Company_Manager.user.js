@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.8.3-alpha
+// @version      10.8.5-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -1856,6 +1856,116 @@ function runCapture() {
               this.saveCfg(c);
           },
 
+          /** Stable per-browser install id for multi-device Discord log dedupe */
+          getClientId() {
+              let id = Storage.get('discord_client_id', '');
+              if (!id || typeof id !== 'string' || id.length < 8) {
+                  id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+                  Storage.set('discord_client_id', id);
+              }
+              return id;
+          },
+
+          _jsonBinReady() {
+              try {
+                  const cfg = typeof JsonBinSync !== 'undefined' ? JsonBinSync.getCfg() : null;
+                  return !!(cfg && cfg.enabled && cfg.binId && cfg.masterKey);
+              } catch (_e) { return false; }
+          },
+
+          async _pullDiscordMetaFromBin() {
+              if (!this._jsonBinReady()) return;
+              try {
+                  const body = await JsonBinSync.pull();
+                  if (body && body.discord_cfg && typeof body.discord_cfg === 'object') {
+                      const dLocal = Storage.get('discord_cfg', {}) || {};
+                      const remoteMeta = body.discord_cfg.meta || {};
+                      // Remote meta wins for claim / last-post coordination
+                      Storage.set('discord_cfg', {
+                          ...dLocal,
+                          ...body.discord_cfg,
+                          opts: { ...(dLocal.opts || {}), ...((body.discord_cfg.opts) || {}) },
+                          meta: { ...(dLocal.meta || {}), ...remoteMeta }
+                      });
+                  }
+              } catch (e) {
+                  console.warn('[TCM] Discord meta pull failed', e);
+              }
+          },
+
+          async _pushDiscordMetaToBin() {
+              if (!this._jsonBinReady()) return;
+              try {
+                  await JsonBinSync.push(JsonBinSync.buildPayload());
+              } catch (e) {
+                  console.warn('[TCM] Discord meta push failed', e);
+              }
+          },
+
+          /**
+           * Coordinate permanent-log posts across devices via JSONBin (Morrakiu TCM logic).
+           * Returns true if this client should post the daily log message.
+           * force=true bypasses (manual post always allowed).
+           */
+          async shouldPostDailyLog(dateStr, force) {
+              if (force) return true;
+              const myId = this.getClientId();
+              const now = Date.now();
+              const CLAIM_MS = 3 * 60 * 1000;
+
+              await this._pullDiscordMetaFromBin();
+
+              let meta = this.getMeta();
+              // Already completed today
+              if (meta.lastLogPostDateTCT === dateStr) return false;
+              // Back-compat: older builds only set lastPostDateTCT
+              if (meta.lastLogPostDateTCT == null && meta.lastPostDateTCT === dateStr) return false;
+
+              // Another device holds an active claim
+              if (
+                  meta.logClaimDate === dateStr &&
+                  meta.logClaimId &&
+                  meta.logClaimId !== myId &&
+                  (now - (Number(meta.logClaimTs) || 0)) < CLAIM_MS
+              ) {
+                  return false;
+              }
+
+              // Claim the slot
+              this.saveMeta({
+                  logClaimDate: dateStr,
+                  logClaimId: myId,
+                  logClaimTs: now
+              });
+
+              if (this._jsonBinReady()) {
+                  try {
+                      await this._pushDiscordMetaToBin();
+                      await new Promise(r => setTimeout(r, 900));
+                      await this._pullDiscordMetaFromBin();
+                      meta = this.getMeta();
+                      if (meta.lastLogPostDateTCT === dateStr) return false;
+                      if (meta.logClaimDate === dateStr && meta.logClaimId && meta.logClaimId !== myId) {
+                          return false;
+                      }
+                  } catch (e) {
+                      console.warn('[TCM] log claim coordinate failed', e);
+                  }
+              }
+              return true;
+          },
+
+          markDailyLogPosted(dateStr) {
+              this.saveMeta({
+                  lastLogPostDateTCT: dateStr,
+                  lastPostDateTCT: dateStr,
+                  lastPostTs: Date.now(),
+                  logClaimDate: dateStr,
+                  logClaimId: this.getClientId(),
+                  logClaimTs: Date.now()
+              });
+          },
+
           isValidWebhook(url) {
               return !!(url && /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(String(url).trim()));
           },
@@ -1932,19 +2042,36 @@ function runCapture() {
               }).slice(0, 10);
           },
 
-          _estimateDailyTrains(profile, employees) {
+          _estimateDailyTrains(profile, employees, typeName) {
+              // Match company train budget: min(20, stars) + trainer EE bonuses
               const rating = parseInt(profile?.rating || 0, 10) || 0;
-              const stars = Math.max(1, Math.min(10, rating || 1));
-              // Rough: 1 train base + star bonuses (aligned with common TCM estimates)
-              let daily = Math.min(10, 1 + Math.floor(stars / 2));
+              const stars = Math.max(0, Math.min(10, rating));
+              let daily = Math.min(20, stars);
               let hasTrainer = false;
+              let trainerBonus = 0;
+              const positions = (typeof CompanyData !== 'undefined' && CompanyData.positions)
+                  ? (CompanyData.positions(typeName || '') || {})
+                  : {};
               for (const emp of Object.values(employees || {})) {
                   if (!emp) continue;
-                  const pos = String(emp.position || '');
-                  if (/trainer|hr officer|human resources/i.test(pos)) hasTrainer = true;
+                  let isTrainer = false;
+                  if (typeof PosNorm !== 'undefined' && PosNorm.resolve) {
+                      const res = PosNorm.resolve(emp.position, positions);
+                      if (res?.data?.special === 'trainer') isTrainer = true;
+                  }
+                  if (!isTrainer) {
+                      const pos = String(emp.position || '');
+                      if (/^trainer$/i.test(pos) || /\btrainer\b/i.test(pos)) isTrainer = true;
+                  }
+                  if (!isTrainer) continue;
+                  hasTrainer = true;
+                  const eff = emp.effectiveness?.working_stats || 0;
+                  if (eff >= TCM.EE_TIER_4) trainerBonus += 3;
+                  else if (eff >= TCM.EE_TIER_3) trainerBonus += 2;
+                  else if (eff >= TCM.EE_TIER_2) trainerBonus += 1;
               }
-              if (hasTrainer) daily += 1;
-              return { daily, rating: stars, hasTrainer };
+              daily += trainerBonus;
+              return { daily, rating: stars, hasTrainer, trainerBonus };
           },
 
           _trainedTodayCount() {
@@ -1960,8 +2087,8 @@ function runCapture() {
               return n;
           },
 
-          buildUnusedTrainsEmbed(profile, employees) {
-              const trainEst = this._estimateDailyTrains(profile, employees);
+          buildUnusedTrainsEmbed(profile, employees, typeName) {
+              const trainEst = this._estimateDailyTrains(profile, employees, typeName);
               const loggedToday = this._trainedTodayCount();
               const log = Storage.getTrainedLog() || {};
               let totalLogged = 0;
@@ -1969,9 +2096,9 @@ function runCapture() {
                   if (Array.isArray(entries)) totalLogged += entries.length;
               }
               const fields = [
-                  { name: 'Est. trains / day', value: String(trainEst.daily), inline: true },
+                  { name: 'Trains / day', value: String(trainEst.daily) + (trainEst.trainerBonus ? ` (${trainEst.rating}★ +${trainEst.trainerBonus} trainer)` : ` (${trainEst.rating}★)`), inline: true },
                   { name: 'Rating', value: '★' + trainEst.rating, inline: true },
-                  { name: 'Trainer staffed', value: trainEst.hasTrainer ? 'Yes' : 'No', inline: true },
+                  { name: 'Trainer staffed', value: trainEst.hasTrainer ? ('Yes' + (trainEst.trainerBonus ? ` (+${trainEst.trainerBonus})` : '')) : 'No', inline: true },
                   { name: 'Train actions logged today (TCT)', value: String(loggedToday), inline: true },
                   { name: 'Lifetime logged trains', value: String(totalLogged), inline: true }
               ];
@@ -2169,7 +2296,7 @@ function runCapture() {
               const embeds = [];
               let starEmbed = null;
 
-              if (opts.unusedTrains) embeds.push(this.buildUnusedTrainsEmbed(p, employees));
+              if (opts.unusedTrains) embeds.push(this.buildUnusedTrainsEmbed(p, employees, state.typeName));
               if (opts.dailyMetrics) embeds.push(this.buildDailyMetricsEmbed(p, stock));
               if (opts.employeeAlerts) embeds.push(this.buildEmployeeAlertsEmbed(p, employees));
               if (opts.starChange) {
@@ -2197,17 +2324,26 @@ function runCapture() {
                   embeds: clean
               };
 
-              const results = { log: false, panel: false };
+              const results = { log: false, panel: false, logSkipped: false };
               const errors = [];
-              const meta = this.getMeta();
+              let meta = this.getMeta();
 
-              // Permanent log — always append
+              // Permanent log — once per TCT day across devices (JSONBin claim)
               if (hasLog) {
-                  try {
-                      await this.postToWebhook(cfg.logWebhook, body, false);
-                      results.log = true;
-                  } catch (e) {
-                      errors.push('log: ' + (e.message || e));
+                  const mayPostLog = await this.shouldPostDailyLog(tct.dateStr, force);
+                  if (!mayPostLog) {
+                      results.logSkipped = true;
+                      console.log('[TCM] Permanent Discord log skipped (already posted or claimed by another device)');
+                  } else {
+                      try {
+                          await this.postToWebhook(cfg.logWebhook, body, false);
+                          results.log = true;
+                          this.markDailyLogPosted(tct.dateStr);
+                          // Share completion so other devices skip
+                          try { await this._pushDiscordMetaToBin(); } catch (_pe) { /* local mark still set */ }
+                      } catch (e) {
+                          errors.push('log: ' + (e.message || e));
+                      }
                   }
               }
 
@@ -2261,7 +2397,8 @@ function runCapture() {
                   // 18:15 TCT gate
                   if (tct.hour < 18 || (tct.hour === 18 && tct.min < 15)) return;
                   const meta = this.getMeta();
-                  if (meta.lastPostDateTCT === tct.dateStr) return;
+                  // Skip if this device already posted (or another did and meta was synced)
+                  if (meta.lastLogPostDateTCT === tct.dateStr || meta.lastPostDateTCT === tct.dateStr) return;
                   this.runReports(state, false).catch(e => console.warn('[TCM] Discord auto-post failed:', e));
               } catch (e) {
                   console.warn('[TCM] Discord auto-post error:', e);
