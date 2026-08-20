@@ -1,15 +1,16 @@
-# Full script upload
+# Full script upload — TCM ALPHA
 
-The complete `Torn_Company_Manager.user.js` (v3.25.2, ~340KB) exceeds the automated GitHub tool payload limit used in this environment.
+The complete `Torn_Company_Manager.user.js` (**v10.9.0-alpha**, ~1.2MB) is large; upload it manually to GitHub.
 
-## Upload the full file (one minute)
+## Upload (about one minute)
 
-1. Open https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Beta
-2. Click **Torn_Company_Manager.user.js** → **pencil (Edit)** or upload a new file
+1. Open https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Alpha  
+2. Click **Torn_Company_Manager.user.js** → **pencil (Edit)** (or upload/replace)  
 3. Paste/replace with the full contents from your project artifact:
-   - Local path: `artifacts/Torn_Company_Manager.user.js`
-4. Commit to **`Morrakiu-TCM-Beta`**
+   - Local path: `artifacts/TCM_ALPHA.user.js`  
+   - GitHub path must remain: **`Torn_Company_Manager.user.js`** (matches `@downloadURL` / `@updateURL`)  
+4. Commit to **`Morrakiu-TCM-Alpha`**
 
-README.md and INSTALL.md on `Morrakiu-TCM-Beta` already document v3.25.2 (peer role-mix advisor API-only, training contracts, calculator, daily plan).
+README.md, INSTALL.md, and UPLOAD_SCRIPT.md on this branch document **10.9.0-alpha**.
 
-Until the full file is uploaded, install from the local artifact via Tampermonkey → Create new script → paste.
+Until the full file is uploaded, install locally: Tampermonkey → Create a new script → paste `TCM_ALPHA.user.js`.
