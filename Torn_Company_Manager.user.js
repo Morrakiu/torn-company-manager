@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.8.7-alpha
+// @version      10.9.0-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -31,7 +31,7 @@
       'use strict';
 
       const TCM = {
-          VERSION: '10.7.0-alpha',
+          VERSION: '10.9.0-alpha',
           NS: 'TCM_v2_',
           API_BASE: 'https://api.torn.com',
           API_RATE_LIMIT_MS: 1000,
@@ -1029,7 +1029,7 @@ getTodayTrained() {
           },
 
           getTrainSales() { return this.get('train_sales', []); },
-          saveTrainSales(sales) { this.set('train_sales', sales); },
+          saveTrainSales(sales) { this._simSchedCache = null; this.set('train_sales', sales); },
           getPaidContracts() { return this.get('paid_contracts', []); },
           savePaidContract(c) {
               const all = this.getPaidContracts();
@@ -1157,6 +1157,12 @@ getTodayTrained() {
               const excludeId = opts.excludeId;
               const horizon = Math.max(1, Math.min(60, Number(opts.horizon) || 14));
               const fromDate = (opts.fromDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+              // Short TTL cache — freeTrainsOnDate / 7-day UI often re-sim the same window
+              const _ck = [fromDate, horizon, excludeId || '', (this.getTrainSales() || []).length].join('|');
+              const _now = Date.now();
+              if (this._simSchedCache && this._simSchedCache.key === _ck && (_now - this._simSchedCache.ts) < 2500) {
+                  return this._simSchedCache.value;
+              }
               const { base } = this.dailyTrainBudget(state);
 
               // Include any active contract with remaining work OR a daily reservation.
@@ -1223,7 +1229,9 @@ getTodayTrained() {
                       allocs
                   });
               }
-              return { base, fromDate, days };
+              const _out = { base, fromDate, days };
+              this._simSchedCache = { key: _ck, ts: Date.now(), value: _out };
+              return _out;
           },
           reservedTrainsOnDate(dateStr, opts) {
               opts = opts || {};
