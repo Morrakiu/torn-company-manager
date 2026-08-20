@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.8.6-alpha
+// @version      10.8.7-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -2042,14 +2042,30 @@ function runCapture() {
           },
 
           _estimateDailyTrains(profile, employees, typeName) {
-              // Match company train budget: min(20, stars) + trainer EE bonuses
+              // Same formula as Training tab / Storage.dailyTrainBudget: min(20, stars) + trainer EE bonuses
+              const stateLike = {
+                  profile: profile || {},
+                  employees: employees || {},
+                  typeName: typeName || (typeof UI !== 'undefined' && UI.state ? UI.state.typeName : '')
+              };
+              if (typeof Storage !== 'undefined' && typeof Storage.dailyTrainBudget === 'function') {
+                  try {
+                      const b = Storage.dailyTrainBudget(stateLike);
+                      return {
+                          daily: b.base,
+                          rating: b.stars,
+                          hasTrainer: b.trainerBonus > 0,
+                          trainerBonus: b.trainerBonus
+                      };
+                  } catch (_e) { /* fall through */ }
+              }
               const rating = parseInt(profile?.rating || 0, 10) || 0;
               const stars = Math.max(0, Math.min(10, rating));
               let daily = Math.min(20, stars);
               let hasTrainer = false;
               let trainerBonus = 0;
               const positions = (typeof CompanyData !== 'undefined' && CompanyData.positions)
-                  ? (CompanyData.positions(typeName || '') || {})
+                  ? (CompanyData.positions(stateLike.typeName || '') || {})
                   : {};
               for (const emp of Object.values(employees || {})) {
                   if (!emp) continue;
@@ -2060,7 +2076,7 @@ function runCapture() {
                   }
                   if (!isTrainer) {
                       const pos = String(emp.position || '');
-                      if (/^trainer$/i.test(pos) || /\btrainer\b/i.test(pos)) isTrainer = true;
+                      if (/trainer/i.test(pos)) isTrainer = true;
                   }
                   if (!isTrainer) continue;
                   hasTrainer = true;
@@ -2095,7 +2111,7 @@ function runCapture() {
                   if (Array.isArray(entries)) totalLogged += entries.length;
               }
               const fields = [
-                  { name: 'Trains / day', value: String(trainEst.daily) + (trainEst.trainerBonus ? ` (${trainEst.rating}★ +${trainEst.trainerBonus} trainer)` : ` (${trainEst.rating}★)`), inline: true },
+                  { name: 'Company trains / day', value: String(trainEst.daily) + (trainEst.trainerBonus ? ` (${trainEst.rating}★ +${trainEst.trainerBonus} trainer)` : ` (${trainEst.rating}★)`), inline: true },
                   { name: 'Rating', value: '★' + trainEst.rating, inline: true },
                   { name: 'Trainer staffed', value: trainEst.hasTrainer ? ('Yes' + (trainEst.trainerBonus ? ` (+${trainEst.trainerBonus})` : '')) : 'No', inline: true },
                   { name: 'Train actions logged today (TCT)', value: String(loggedToday), inline: true },
@@ -2104,7 +2120,7 @@ function runCapture() {
               if (loggedToday < trainEst.daily) {
                   fields.push({
                       name: 'Possible unused',
-                      value: 'Up to **' + Math.max(0, trainEst.daily - loggedToday) + '** trains may still be available today (estimate).'
+                      value: 'Up to **' + Math.max(0, trainEst.daily - loggedToday) + '** trains may still be available today.'
                   });
               } else {
                   fields.push({ name: 'Status', value: 'Log suggests daily capacity was used (or exceeded).' });
@@ -2165,26 +2181,28 @@ function runCapture() {
               const alerts = [];
               const now = Date.now();
               const inactiveDays = Storage.getSettings().inactiveThreshold ?? 3;
+              const addictionThreshold = -(Math.abs(Storage.getSettings().addictionThreshold ?? 5));
               for (const [id, emp] of Object.entries(employees || {})) {
                   if (!emp) continue;
                   const name = emp.name || ('#' + id);
                   const pos = emp.position || '?';
-                  if (emp.status && /hospital|jail/i.test(String(emp.status.state || emp.status || ''))) {
-                      alerts.push('**' + name + '** (' + pos + ') — ' + (emp.status.state || emp.status));
+                  // Addiction + inactivity only (no hospital / jail)
+                  const addiction = emp.effectiveness?.addiction || 0;
+                  if (addiction < addictionThreshold) {
+                      alerts.push('**' + name + '** (' + pos + ') — addiction ' + addiction + ' EE');
                   }
                   const last = emp.last_action?.timestamp
                       ? emp.last_action.timestamp * (emp.last_action.timestamp < 1e12 ? 1000 : 1)
-                      : (emp.last_action?.relative ? null : null);
+                      : null;
                   if (last) {
                       const days = (now - last) / 86400000;
                       if (days >= inactiveDays) {
                           alerts.push('**' + name + '** (' + pos + ') — inactive ~' + days.toFixed(1) + 'd');
                       }
                   } else if (emp.last_action?.relative && /day|week|month/i.test(emp.last_action.relative)) {
-                      // relative string like "2 days ago"
                       const m = String(emp.last_action.relative).match(/(\d+)\s*day/i);
                       if (m && parseInt(m[1], 10) >= inactiveDays) {
-                          alerts.push('**' + name + '** (' + pos + ') — ' + emp.last_action.relative);
+                          alerts.push('**' + name + '** (' + pos + ') — inactive ' + emp.last_action.relative);
                       }
                   }
               }
@@ -2193,7 +2211,7 @@ function runCapture() {
                       title: 'Employee Alerts',
                       description: (p.name || 'Company') + ' · ' + this.getTCTParts().dateStr + ' TCT',
                       color: 0x57f287,
-                      fields: [{ name: 'Status', value: 'No inactivity / hospital / jail alerts.' }],
+                      fields: [{ name: 'Status', value: 'No addiction or inactivity alerts.' }],
                       timestamp: new Date().toISOString()
                   };
               }
@@ -18989,7 +19007,7 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
 
 
       function _checkForUpdates() {
-          // GreasyFork update checks disabled — userscript updates via @updateURL (GitHub).
+          // Remote version polling disabled — updates via userscript manager @updateURL (GitHub).
           return;
       }
 
