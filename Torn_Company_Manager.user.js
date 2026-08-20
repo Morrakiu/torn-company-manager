@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.9.0-alpha
+// @version      10.10.0-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -31,7 +31,7 @@
       'use strict';
 
       const TCM = {
-          VERSION: '10.9.0-alpha',
+          VERSION: '10.10.0-alpha',
           NS: 'TCM_v2_',
           API_BASE: 'https://api.torn.com',
           API_RATE_LIMIT_MS: 1000,
@@ -1068,6 +1068,33 @@ getTodayTrained() {
               if (c.openEnded === false) return false;
               const t = Number(c.totalTrains);
               return !(t > 0);
+          },
+          /** Complimentary trains — tracked for delivery, $0 on balance / finance. */
+          isFreeContract(c) {
+              if (!c) return false;
+              if (c.isFree === true || c.free === true) return true;
+              if (c.isFree === false) return false;
+              return false;
+          },
+          /** Complimentary train allowance (first N delivered trains are $0). Infinity if fully free. */
+          getFreeAllowance(c) {
+              if (!c) return 0;
+              if (this.isFreeContract(c)) return Infinity;
+              const n = Math.floor(Number(c.freeTrains) || 0);
+              return n > 0 ? n : 0;
+          },
+          /** Delivered trains that bill at pricePerTrain (after free allowance). */
+          billableTrainsDone(c, done) {
+              const free = this.getFreeAllowance(c);
+              if (!isFinite(free)) return 0;
+              return Math.max(0, (Number(done) || 0) - free);
+          },
+          /** Free trains already consumed from the allowance. */
+          freeTrainsUsed(c, done) {
+              const free = this.getFreeAllowance(c);
+              if (!isFinite(free)) return Number(done) || 0;
+              if (free <= 0) return 0;
+              return Math.min(free, Number(done) || 0);
           },
           /** YYYY-MM-DD day difference (b - a), UTC. */
           daysBetweenIso(a, b) {
@@ -13440,15 +13467,24 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
   });
       const done = entries.length;
                   const openEnded = Storage.isOpenEndedContract(c);
+                  const isFree = Storage.isFreeContract(c);
+                  const freeAllowance = Storage.getFreeAllowance(c);
+                  const freeUsed = Storage.freeTrainsUsed(c, done);
+                  const freeLeft = isFinite(freeAllowance) ? Math.max(0, freeAllowance - freeUsed) : 0;
                   const totalTrainsN = openEnded ? 0 : (Number(c.totalTrains) || 0);
                   const remaining = openEnded ? null : Math.max(0, totalTrainsN - done);
-                  const ppt = Number(c.pricePerTrain) || 0;
-                  const cashEarned = done * ppt;
-                  const cashRemaining = openEnded ? null : ((remaining || 0) * ppt);
-                  const totalValue = openEnded ? null : (totalTrainsN * ppt);
-                  const payments = Storage.getContractPayments(c);
+                  const ppt = isFree ? 0 : (Number(c.pricePerTrain) || 0);
+                  const billableDone = Storage.billableTrainsDone(c, done);
+                  const cashEarned = billableDone * ppt;
+                  const billableTotal = openEnded || !isFinite(freeAllowance)
+                      ? null
+                      : Math.max(0, totalTrainsN - freeAllowance);
+                  const cashRemaining = openEnded ? null
+                      : (isFree ? 0 : Math.max(0, (billableTotal != null ? billableTotal : totalTrainsN) - billableDone) * ppt);
+                  const totalValue = openEnded ? null : (isFree ? 0 : ((billableTotal != null ? billableTotal : totalTrainsN) * ppt));
+                  const payments = isFree ? [] : Storage.getContractPayments(c);
                   const amountPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-                  const balanceDue = cashEarned - amountPaid;
+                  const balanceDue = isFree ? 0 : (cashEarned - amountPaid);
                   const week7 = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
                   const recentEntries = entries.filter(e => e.date >= week7);
                   const dailyRate = recentEntries.length / 7;
@@ -13459,6 +13495,11 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   return {
                       ...c,
                       openEnded,
+                      isFree,
+                      freeAllowance: isFinite(freeAllowance) ? freeAllowance : null,
+                      freeUsed,
+                      freeLeft,
+                      billableDone,
                       totalTrains: openEnded ? 0 : totalTrainsN,
                       done,
                       remaining,
@@ -13527,12 +13568,19 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                                   color:#ef4444;border-radius:3px;padding:2px 7px;cursor:pointer;font-size:11px;">✕</button>
                           </div>
                       </div>
-                      <div class="tcm-row"><span class="lbl">Contract</span><span class="val">${c.openEnded
-                          ? ('Open-ended · ' + Calc.fmtCash(c.pricePerTrain) + '/train')
-                          : (c.totalTrains + ' trains @ ' + Calc.fmtCash(c.pricePerTrain) + ' each')}</span></div>
-                      ${c.openEnded
-                          ? '<div class="tcm-row"><span class="lbl">Type</span><span class="val" style="color:#a78bfa;">Long-term / no fixed total</span></div>'
-                          : ('<div class="tcm-row"><span class="lbl">Total value</span><span class="val">' + Calc.fmtCash(c.totalValue) + '</span></div>')}
+                      <div class="tcm-row"><span class="lbl">Contract</span><span class="val">${c.isFree
+                          ? (c.openEnded ? 'Open-ended · <span style="color:#7eb8ff;">FREE</span>' : (c.totalTrains + ' trains · <span style="color:#7eb8ff;">FREE</span>'))
+                          : (c.openEnded
+                              ? ('Open-ended · ' + Calc.fmtCash(c.pricePerTrain) + '/train')
+                              : (c.totalTrains + ' trains @ ' + Calc.fmtCash(c.pricePerTrain) + ' each'))}</span></div>
+                      ${c.isFree
+                          ? '<div class="tcm-row"><span class="lbl">Type</span><span class="val" style="color:#7eb8ff;">Complimentary — no payment</span></div>'
+                          : (c.openEnded
+                              ? '<div class="tcm-row"><span class="lbl">Type</span><span class="val" style="color:#a78bfa;">Long-term / no fixed total</span></div>'
+                              : ('<div class="tcm-row"><span class="lbl">Total value</span><span class="val">' + Calc.fmtCash(c.totalValue) + '</span></div>'))}
+                      ${(c.freeAllowance > 0 || c.isFree) ? `<div class="tcm-row"><span class="lbl">Free trains</span><span class="val" style="color:#7eb8ff;">${c.isFree
+                          ? (c.done + ' delivered (all complimentary)')
+                          : (c.freeUsed + ' / ' + c.freeAllowance + ' free used · ' + c.freeLeft + ' free left · ' + (c.billableDone || 0) + ' billable')}</span></div>` : ''}
                       <div class="tcm-row"><span class="lbl">Progress</span><span class="val green">${c.openEnded
                           ? (c.done + ' trains delivered')
                           : (c.done + ' / ' + c.totalTrains + ' trains (' + pct + '%)')}</span></div>
@@ -13541,14 +13589,18 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                               <div class="tcm-bar-fill ${barCls}" style="width:${pct}%;"></div>
                           </div>
                       </div>`}
-                      <div class="tcm-row"><span class="lbl">Used train value</span><span class="val green">${Calc.fmtCash(c.cashEarned)}</span></div>
+                      ${c.isFree ? `
+                      <div class="tcm-row"><span class="lbl">Payment</span><span class="val" style="color:#7eb8ff;">Free — excluded from balance sheet</span></div>
+                      ` : `
+                      <div class="tcm-row"><span class="lbl">Billable train value</span><span class="val green">${Calc.fmtCash(c.cashEarned)}${(c.freeUsed > 0) ? ' <span style="color:#7eb8ff;font-size:11px;">(' + c.freeUsed + ' free not charged)</span>' : ''}</span></div>
                       <div class="tcm-row"><span class="lbl">Payments received</span><span class="val" style="color:#a78bfa;">${Calc.fmtCash(c.amountPaid || 0)}</span></div>
-                      <div class="tcm-row"><span class="lbl">Balance (delivered − paid)</span><span class="val ${(c.balanceDue||0) > 0 ? 'amber' : (c.balanceDue||0) < 0 ? 'green' : ''}">${(c.balanceDue||0) > 0 ? Calc.fmtCash(c.balanceDue) + ' due' : (c.balanceDue||0) < 0 ? Calc.fmtCash(-(c.balanceDue||0)) + ' credit' : Calc.fmtCash(0)}</span></div>
-                      ${!c.openEnded ? `<div class="tcm-row"><span class="lbl">Remaining train value</span><span class="val amber">${Calc.fmtCash(c.cashRemaining)}</span></div>` : ''}
+                      <div class="tcm-row"><span class="lbl">Balance (billable − paid)</span><span class="val ${(c.balanceDue||0) > 0 ? 'amber' : (c.balanceDue||0) < 0 ? 'green' : ''}">${(c.balanceDue||0) > 0 ? Calc.fmtCash(c.balanceDue) + ' due' : (c.balanceDue||0) < 0 ? Calc.fmtCash(-(c.balanceDue||0)) + ' credit' : Calc.fmtCash(0)}</span></div>
+                      ${!c.openEnded ? `<div class="tcm-row"><span class="lbl">Remaining billable value</span><span class="val amber">${Calc.fmtCash(c.cashRemaining)}</span></div>` : ''}
+                      `}
                       ${!c.openEnded && c.daysToComplete !== null
                           ? `<div class="tcm-row"><span class="lbl">Est. completion</span><span class="val">${c.daysToComplete}d at ${c.dailyRate.toFixed(1)} trains/day</span></div>`
                           : (!c.openEnded ? `<div class="tcm-row"><span class="lbl">Est. completion</span><span class="val" style="color:#888;">Not enough data yet</span></div>` : '')}
-                      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a2a2a;">
+                      ${c.isFree ? '' : `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a2a2a;">
                           <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Payments over time</div>
                           ${(c.payments && c.payments.length) ? c.payments.slice().sort((a,b) => String(a.date).localeCompare(String(b.date))).map(p =>
                               `<div class="tcm-row" style="font-size:11px;">
@@ -13573,7 +13625,7 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                           <div style="margin-top:4px;">
                               <input class="tcm-input tcm-sale-pay-note" data-id="${c.id}" type="text" placeholder="Note (optional)" style="width:100%;box-sizing:border-box;font-size:11px;padding:3px 6px;" />
                           </div>
-                      </div>
+                      </div>`}
                       <div class="tcm-row" style="margin-top:4px;">
                           <span class="lbl">Daily trains</span>
                           <div style="display:flex;align-items:center;gap:6px;">
@@ -13582,6 +13634,15 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                                   style="width:55px;padding:3px 6px;font-size:12px;" />
                               <span style="font-size:11px;color:#888;">trains/day</span>
                           </div>
+                          ${c.isFree ? '' : `<div class="tcm-row" style="margin-top:4px;">
+                              <span class="lbl">Free trains</span>
+                              <div style="display:flex;align-items:center;gap:6px;">
+                                  <input type="number" min="0" value="${c.freeTrains || c.freeAllowance || 0}"
+                                      class="tcm-input tcm-sale-free-trains" data-id="${c.id}"
+                                      style="width:55px;padding:3px 6px;font-size:12px;" title="First N delivered trains are complimentary" />
+                                  <span style="font-size:11px;color:#7eb8ff;">complimentary (not billed)</span>
+                              </div>
+                          </div>`}
                       </div>
                       ${c.notes ? `<div style="font-size:12px;color:#9ca3af;margin-top:6px;font-style:italic;">"${c.notes}"</div>` : ''}
                       <div style="font-size:11px;color:#4b5563;margin-top:6px;">Trains counted from: <strong style="color:#888;">${c.startDate}</strong> · all trains to this employee since that date count toward this contract.</div>
@@ -13657,6 +13718,15 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                       <input type="checkbox" id="sale-open-ended" style="accent-color:#7eb8ff;cursor:pointer;" />
                       Open-ended / long-term (no fixed total)
                   </label>
+                  <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:#7eb8ff;cursor:pointer;">
+                      <input type="checkbox" id="sale-is-free" style="accent-color:#7eb8ff;cursor:pointer;" />
+                      Fully free (entire contract complimentary)
+                  </label>
+                  <div style="margin-top:6px;">
+                      <div style="font-size:11px;color:#9ca3af;margin-bottom:2px;">Free trains allowance <span style="color:#666;">(first N free, then paid)</span></div>
+                      <input class="tcm-input" id="sale-free-trains" type="number" min="0" placeholder="e.g. 50" style="width:100%;box-sizing:border-box;" />
+                      <div style="font-size:10px;color:#666;margin-top:2px;">Not charged on the balance sheet. Extra trains after this use the price below.</div>
+                  </div>
               </div>
              <div>
                   <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Pricing method</div>
@@ -13854,8 +13924,22 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
 
                  if (!empId)           { alert('Select an employee.'); return; }
                   const openEnded = !!document.getElementById('sale-open-ended')?.checked;
+                  const isFree = !!document.getElementById('sale-is-free')?.checked;
+                  const freeTrains = Math.max(0, parseInt(document.getElementById('sale-free-trains')?.value || '0', 10) || 0);
                   if (!openEnded && (!trains || trains < 1)) { alert('Enter total trains, or check Open-ended.'); return; }
-                  if (!price  || price  < 1) { alert('Enter price per train.'); return; }
+                  if (!isFree && (!price || price < 1) && freeTrains < 1) { alert('Enter price per train, free allowance, or mark Fully free.'); return; }
+                  if (!isFree && (!price || price < 1) && freeTrains > 0 && openEnded) {
+                      // open-ended with only free allowance still needs a future price if they continue after free
+                      // allow 0 price only when fully free
+                  }
+                  if (isFree) price = 0;
+                  else if ((!price || price < 1) && freeTrains > 0 && !openEnded && trains > 0 && freeTrains >= trains) {
+                      // fixed deal fully covered by free allowance
+                      price = 0;
+                  } else if (!isFree && (!price || price < 1)) {
+                      alert('Enter price per train for paid trains after the free allowance.');
+                      return;
+                  }
                   // Open-ended deals need a daily reservation so the schedule can place them
                   if (openEnded && reservation < 1) {
                       alert('Open-ended contracts need Daily trains set (e.g. 3/day) so the 7-day schedule can reserve them.');
@@ -13925,19 +14009,23 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                   }
 
                   const sales = Storage.getTrainSales();
+                  const fullyFree = isFree || ((!openEnded && trains > 0 && freeTrains >= trains) || (isFree));
                   sales.push({
                       id: Date.now().toString(),
                       buyerName: state.employees[empId]?.name || empId,
                       buyerEmpId: empId,
                       openEnded: openEnded,
+                      isFree: !!fullyFree,
+                      freeTrains: fullyFree ? 0 : freeTrains,
                       totalTrains: openEnded ? 0 : trains,
-                      pricePerTrain: price,
+                      pricePerTrain: fullyFree ? 0 : price,
                       dailyReservation: reservation,
                       startDate,
-                      notes,
-                      payStatus: _payStatus,
-                      prepaidAmount: _initPay,
-                      payments,
+                      notes: fullyFree && !notes ? 'Complimentary / free trains'
+                          : (freeTrains > 0 && !notes ? (freeTrains + ' free trains, then paid') : notes),
+                      payStatus: fullyFree ? 'free' : _payStatus,
+                      prepaidAmount: fullyFree ? 0 : _initPay,
+                      payments: fullyFree ? [] : payments,
                       active: true
                   });
                   Storage.saveTrainSales(sales);
@@ -13968,6 +14056,31 @@ ${ranked.sort((a, b) => b.avgProfit - a.avgProfit).map(r => {
                       const sales = Storage.getTrainSales();
                       const idx = sales.findIndex(s => s.id === id);
                       if (idx >= 0) { sales[idx].dailyReservation = val; Storage.saveTrainSales(sales); }
+                      this._renderTab('calc');
+                  });
+              });
+
+              document.querySelectorAll('.tcm-sale-free-trains').forEach(input => {
+                  input.addEventListener('change', () => {
+                      const id = input.dataset.id;
+                      const val = Math.max(0, parseInt(input.value, 10) || 0);
+                      const sales = Storage.getTrainSales();
+                      const idx = sales.findIndex(s => s.id === id);
+                      if (idx < 0) return;
+                      sales[idx].freeTrains = val;
+                      // If free covers full fixed total, treat as fully free
+                      if (!sales[idx].openEnded && (Number(sales[idx].totalTrains) || 0) > 0
+                          && val >= (Number(sales[idx].totalTrains) || 0)) {
+                          sales[idx].isFree = true;
+                          sales[idx].pricePerTrain = 0;
+                          sales[idx].payStatus = 'free';
+                      } else if (sales[idx].isFree && val > 0) {
+                          // switching from fully-free flag to allowance mode needs a price — leave isFree if no price
+                          if ((Number(sales[idx].pricePerTrain) || 0) > 0) {
+                              sales[idx].isFree = false;
+                          }
+                      }
+                      Storage.saveTrainSales(sales);
                       this._renderTab('calc');
                   });
               });
