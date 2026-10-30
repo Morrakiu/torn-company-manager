@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.11.0-alpha
+// @version      10.12.0-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -19,6 +19,8 @@
 // @connect      discord.com
 // @connect      discordapp.com
 // @connect      api.jsonbin.io
+// @connect      api.github.com
+// @connect      gist.githubusercontent.com
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @run-at       document-idle
@@ -140,22 +142,40 @@
             if (opts.ontimeout) opts.ontimeout();
             else fail(new Error('Timeout'));
         }, opts.timeout) : 0;
+        const finishHdr = (status, text, hdrs) => {
+            if (timer) clearTimeout(timer);
+            let responseHeaders = '';
+            if (typeof hdrs === 'string') responseHeaders = hdrs;
+            else if (hdrs && typeof hdrs.get === 'function') {
+                responseHeaders = ['retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining']
+                    .map(h => h + ': ' + (hdrs.get(h) || '')).join('\n');
+            }
+            if (settled) return;
+            settled = true;
+            const res = { status: status, statusText: String(status), responseText: text == null ? '' : String(text), readyState: 4, finalUrl: url, responseHeaders: responseHeaders };
+            if (opts.onload) opts.onload(res);
+        };
         const pdaGet = (typeof PDA_httpGet === 'function') ? PDA_httpGet : null;
         const pdaPost = (typeof PDA_httpPost === 'function') ? PDA_httpPost : null;
-        const onOk = (text) => { if (timer) clearTimeout(timer); finish(200, text); };
+        const pdaReq = (typeof PDA_httpRequest === 'function') ? PDA_httpRequest : null;
+        const onOk = (text, status) => finishHdr(status == null ? 200 : status, text, '');
         const onErr = (err) => { if (timer) clearTimeout(timer); fail(err); };
         try {
-            if (method === 'GET' && pdaGet) {
-                Promise.resolve(pdaGet(url, headers)).then(onOk, onErr);
+            if (pdaReq) {
+                Promise.resolve(pdaReq(method, url, headers, body)).then(t => onOk(t, 200), onErr);
                 return;
             }
-            if (method !== 'GET' && pdaPost) {
-                Promise.resolve(pdaPost(url, headers, body)).then(onOk, onErr);
+            if (method === 'GET' && pdaGet) {
+                Promise.resolve(pdaGet(url, headers)).then(t => onOk(t, 200), onErr);
+                return;
+            }
+            if (method === 'POST' && pdaPost) {
+                Promise.resolve(pdaPost(url, headers, body)).then(t => onOk(t, 200), onErr);
                 return;
             }
             if (typeof fetch === 'function') {
                 fetch(url, { method: method, headers: headers, body: method === 'GET' ? undefined : body })
-                    .then(r => r.text().then(t => { if (timer) clearTimeout(timer); finish(r.status, t); }))
+                    .then(r => r.text().then(t => finishHdr(r.status, t, r.headers)))
                     .catch(onErr);
                 return;
             }
@@ -257,7 +277,7 @@
 
 
     const TCM = {
-        VERSION: '10.11.0-alpha',
+        VERSION: '10.12.0-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -421,6 +441,7 @@
         stopAutoRecheck() {}
     };
 
+    let _tcmAfterStorageSet = null;
     const Storage = {
         get(key, fallback = null) {
             try {
@@ -433,6 +454,9 @@
     try {
         const json = JSON.stringify(value);
         _tcmGmSet(TCM.NS + key, json);
+        if (typeof _tcmAfterStorageSet === 'function') {
+            try { _tcmAfterStorageSet(key); } catch (e2) {}
+        }
     } catch (e) {
         console.error(`[TCM Storage.set] FAILED key="${key}" size≈${Math.round((JSON.stringify(value||'').length)/1024)}KB — ${e.message || e}`);
     }
@@ -2144,7 +2168,12 @@ function runCapture() {
             const now = Date.now();
             const CLAIM_MS = 3 * 60 * 1000;
 
-            await this._pullDiscordMetaFromBin();
+            const _useGist = (typeof GistSync !== 'undefined' && GistSync.ready());
+            if (_useGist) {
+                try { await GistSync.syncNow('log-claim-pull'); } catch (e) { console.warn('[TCM] gist claim pull', e); }
+            } else {
+                await this._pullDiscordMetaFromBin();
+            }
 
             let meta = this.getMeta();
             // Already completed today
@@ -2169,7 +2198,18 @@ function runCapture() {
                 logClaimTs: now
             });
 
-            if (this._jsonBinReady()) {
+            if (_useGist) {
+                try {
+                    await GistSync.syncNow('log-claim-push');
+                    await new Promise(r => setTimeout(r, 900));
+                    await GistSync.syncNow('log-claim-confirm');
+                    meta = this.getMeta();
+                    if (meta.lastLogPostDateTCT === dateStr) return false;
+                    if (meta.logClaimDate === dateStr && meta.logClaimId && meta.logClaimId !== myId) return false;
+                } catch (e) {
+                    console.warn('[TCM] gist log claim failed', e);
+                }
+            } else if (this._jsonBinReady()) {
                 try {
                     await this._pushDiscordMetaToBin();
                     await new Promise(r => setTimeout(r, 900));
@@ -2221,10 +2261,6 @@ function runCapture() {
 
         _xhr(method, url, body) {
             return new Promise((resolve, reject) => {
-                if (typeof GM_xmlhttpRequest !== 'function') {
-                    reject(new Error('GM_xmlhttpRequest unavailable'));
-                    return;
-                }
                 _tcmGmXhr({
                     method,
                     url,
@@ -2589,7 +2625,10 @@ function runCapture() {
                         results.log = true;
                         this.markDailyLogPosted(tct.dateStr);
                         // Share completion so other devices skip
-                        try { await this._pushDiscordMetaToBin(); } catch (_pe) { /* local mark still set */ }
+                        try {
+                            if (typeof GistSync !== 'undefined' && GistSync.ready()) await GistSync.syncNow('log-posted');
+                            else await this._pushDiscordMetaToBin();
+                        } catch (_pe) { /* local mark still set */ }
                     } catch (e) {
                         errors.push('log: ' + (e.message || e));
                     }
@@ -2698,8 +2737,7 @@ function runCapture() {
                     ontimeout() { reject(new Error('Timeout')); }
                 };
                 if (body != null) opts.data = typeof body === 'string' ? body : JSON.stringify(body);
-                if (typeof GM_xmlhttpRequest === 'function') _tcmGmXhr(opts);
-                else reject(new Error('GM_xmlhttpRequest unavailable'));
+                _tcmGmXhr(opts);
             });
         },
 
@@ -2972,6 +3010,984 @@ function runCapture() {
             return payload;
         }
     };
+
+    /*GIST_PURE*/
+    const GistCodec = {
+        _bytes(str) {
+            if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str);
+            const bin = unescape(encodeURIComponent(str));
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+        },
+        _text(bytes) {
+            if (typeof TextDecoder !== 'undefined') return new TextDecoder().decode(bytes);
+            let s = '';
+            for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+            return decodeURIComponent(escape(s));
+        },
+        _b64(bytes) {
+            let bin = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(null, bytes.subarray ? bytes.subarray(i, i + 0x8000) : bytes.slice(i, i + 0x8000));
+            }
+            return btoa(bin);
+        },
+        _unb64(b64) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+        },
+        compressUtf8(str) {
+            const bytes = this._bytes(str);
+            let dict = new Map();
+            const reset = () => {
+                dict = new Map();
+                for (let i = 0; i < 256; i++) dict.set(String.fromCharCode(i), i);
+                return 256;
+            };
+            let next = reset();
+            let w = '';
+            const codes = [];
+            const emit = (code) => { codes.push(code & 65535); };
+            for (let i = 0; i < bytes.length; i++) {
+                const c = String.fromCharCode(bytes[i]);
+                const wc = w + c;
+                if (dict.has(wc)) w = wc;
+                else {
+                    emit(dict.get(w));
+                    if (next < 65534) dict.set(wc, next++);
+                    else { emit(65534); next = reset(); }
+                    w = c;
+                }
+            }
+            if (w !== '') emit(dict.get(w));
+            const out = new Uint8Array(codes.length * 2);
+            for (let i = 0; i < codes.length; i++) {
+                out[i * 2] = codes[i] & 255;
+                out[i * 2 + 1] = (codes[i] >> 8) & 255;
+            }
+            return this._b64(out);
+        },
+        decompressUtf8(b64) {
+            const packed = this._unb64(b64);
+            const codes = [];
+            for (let i = 0; i + 1 < packed.length; i += 2) codes.push(packed[i] | (packed[i + 1] << 8));
+            let dict = new Map();
+            const reset = () => {
+                dict = new Map();
+                for (let i = 0; i < 256; i++) dict.set(i, String.fromCharCode(i));
+                return 256;
+            };
+            let next = reset();
+            if (!codes.length) return '';
+            let w = dict.get(codes[0]) || '';
+            let result = w;
+            for (let i = 1; i < codes.length; i++) {
+                const code = codes[i];
+                if (code === 65534) {
+                    next = reset();
+                    if (i + 1 >= codes.length) break;
+                    w = dict.get(codes[++i]) || '';
+                    result += w;
+                    continue;
+                }
+                let entry;
+                if (dict.has(code)) entry = dict.get(code);
+                else if (code === next) entry = w + w.charAt(0);
+                else break;
+                result += entry;
+                if (next < 65534) dict.set(next++, w + entry.charAt(0));
+                w = entry;
+            }
+            const raw = new Uint8Array(result.length);
+            for (let i = 0; i < result.length; i++) raw[i] = result.charCodeAt(i);
+            return this._text(raw);
+        },
+        encodeBundle(bundle) {
+            const json = JSON.stringify(bundle);
+            if (json.length < 40000) {
+                return JSON.stringify({ schema: 1, encoding: 'json', payload: bundle });
+            }
+            try {
+                const packed = this.compressUtf8(json);
+                if (packed && packed.length + 32 < json.length) {
+                    return JSON.stringify({ schema: 1, encoding: 'lzw-b64', payload: packed });
+                }
+            } catch (e) {}
+            return JSON.stringify({ schema: 1, encoding: 'json', payload: bundle });
+        },
+        decodeBundle(text) {
+            if (!text || !String(text).trim()) return null;
+            const wrap = JSON.parse(text);
+            if (!wrap || typeof wrap !== 'object') return null;
+            if (wrap.encoding === 'lzw-b64' && typeof wrap.payload === 'string') {
+                return JSON.parse(this.decompressUtf8(wrap.payload));
+            }
+            if (wrap.encoding === 'json' && wrap.payload && typeof wrap.payload === 'object') return wrap.payload;
+            if (wrap.schema && wrap.data) return wrap;
+            return null;
+        }
+    };
+
+    const GistMerge = {
+        SECRET: new Set(['apiKey', 'api_key', 'companyKey', 'company_key', 'password', 'token', 'secret', 'masterKey', 'master_key', 'githubToken', 'gistToken']),
+        logKey(e) {
+            if (!e || typeof e !== 'object') return '';
+            return String(e._logId || e.ts || ((e.date || '') + '|' + (e.note || '') + '|' + (e.amount || '')));
+        },
+        saleKey(c) {
+            if (!c) return '';
+            return String(c.id || ((c.paidAt || '') + '|' + (c.totalEarned || 0) + '|' + (c.buyerEmpId || '')));
+        },
+        stripMeta(obj) {
+            if (!obj || typeof obj !== 'object') return obj;
+            if (Array.isArray(obj)) return obj.map(x => this.stripMeta(x));
+            const out = {};
+            for (const k of Object.keys(obj)) {
+                if (k === 'updatedAt') continue;
+                out[k] = (obj[k] && typeof obj[k] === 'object') ? this.stripMeta(obj[k]) : obj[k];
+            }
+            return out;
+        },
+        stable(obj) {
+            try { return JSON.stringify(this.stripMeta(obj)); } catch (e) { return ''; }
+        },
+        emptyData() {
+            return {
+                trained_log: {},
+                train_sales: [],
+                paid_contracts: [],
+                snapshots: [],
+                rotation: {},
+                schedule_config: {},
+                schedule_overrides: {},
+                google_sync_cfg: {},
+                discord_cfg: {},
+                overrides: {},
+                settings: {},
+                tombstones: { trained_log: [], train_sales: [], paid_contracts: [], snapshots: [] }
+            };
+        },
+        indexLog(log) {
+            const map = new Map();
+            for (const empId of Object.keys(log || {})) {
+                const arr = Array.isArray(log[empId]) ? log[empId] : [];
+                for (const e of arr) {
+                    const key = this.logKey(e);
+                    if (!key) continue;
+                    map.set(empId + '\0' + key, e);
+                }
+            }
+            return map;
+        },
+        stampFromShadow(prev, next, stamps, tombs) {
+            stamps = stamps || {};
+            tombs = tombs || { trained_log: [], train_sales: [], paid_contracts: [], snapshots: [] };
+            const now = Date.now();
+            const touch = (k) => { stamps[k] = now; };
+            const dropTomb = (list, pred) => (list || []).filter(t => !pred(t));
+
+            const pLog = this.indexLog(prev && prev.trained_log);
+            const nLog = this.indexLog(next && next.trained_log);
+            for (const [k, e] of nLog) {
+                const old = pLog.get(k);
+                if (!old || this.stable(old) !== this.stable(e)) touch('log:' + k);
+                const [empId, key] = k.split('\0');
+                tombs.trained_log = dropTomb(tombs.trained_log, t => t.empId === empId && t.key === key);
+            }
+            for (const [k] of pLog) {
+                if (!nLog.has(k)) {
+                    const [empId, key] = k.split('\0');
+                    tombs.trained_log = dropTomb(tombs.trained_log, t => t.empId === empId && t.key === key);
+                    tombs.trained_log.push({ empId, key, updatedAt: now });
+                    delete stamps['log:' + k];
+                }
+            }
+
+            const indexArr = (arr, keyFn) => {
+                const m = new Map();
+                for (const item of arr || []) {
+                    const id = keyFn(item);
+                    if (id) m.set(id, item);
+                }
+                return m;
+            };
+            const diffArr = (name, keyFn) => {
+                const p = indexArr(prev && prev[name], keyFn);
+                const n = indexArr(next && next[name], keyFn);
+                for (const [id, item] of n) {
+                    const old = p.get(id);
+                    if (!old || this.stable(old) !== this.stable(item)) touch(name + ':' + id);
+                    tombs[name] = dropTomb(tombs[name], t => String(t.id || t.date) === String(id));
+                }
+                for (const [id] of p) {
+                    if (!n.has(id)) {
+                        tombs[name] = dropTomb(tombs[name], t => String(t.id || t.date) === String(id));
+                        const tomb = name === 'snapshots' ? { date: id, updatedAt: now } : { id, updatedAt: now };
+                        tombs[name].push(tomb);
+                        delete stamps[name + ':' + id];
+                    }
+                }
+            };
+            diffArr('train_sales', c => this.saleKey(c));
+            diffArr('paid_contracts', c => this.saleKey(c));
+            diffArr('snapshots', s => s && s.date);
+
+            for (const key of ['rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']) {
+                if (this.stable(prev && prev[key]) !== this.stable(next && next[key])) touch(key);
+            }
+            for (const list of Object.keys(tombs)) {
+                if (Array.isArray(tombs[list]) && tombs[list].length > 400) {
+                    tombs[list] = tombs[list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 400);
+                }
+            }
+            return { stamps, tombs };
+        },
+        _unionPayments(a, b) {
+            const map = new Map();
+            for (const p of [...(a || []), ...(b || [])]) {
+                if (!p) continue;
+                const id = String(p.id || ('p_' + (p.ts || p.date || '')));
+                const old = map.get(id);
+                if (!old || (Number(p.updatedAt || p.ts) || 0) >= (Number(old.updatedAt || old.ts) || 0)) {
+                    map.set(id, { ...p, id });
+                }
+            }
+            return Array.from(map.values());
+        },
+        _normPays(c) {
+            if (!c) return [];
+            if (Array.isArray(c.payments) && c.payments.length) return c.payments.filter(p => p && Number(p.amount) > 0);
+            if (Number(c.prepaidAmount) > 0) {
+                return [{ id: 'prepaid', amount: Number(c.prepaidAmount) || 0, date: c.startDate || '', note: 'Prepaid at start', ts: 0 }];
+            }
+            return [];
+        },
+        mergeDiscord(local, remote) {
+            const l = local || {};
+            const r = remote || {};
+            const lt = Number(l.updatedAt) || 0;
+            const rt = Number(r.updatedAt) || 0;
+            const base = rt >= lt ? { ...l, ...r } : { ...r, ...l };
+            for (const k of ['logWebhook', 'panelWebhook', 'weeklyWebhook']) {
+                if (!base[k]) base[k] = l[k] || r[k] || '';
+            }
+            const lm = l.meta || {};
+            const rm = r.meta || {};
+            const meta = { ...lm, ...rm };
+            meta.lastLogPostDateTCT = rm.lastLogPostDateTCT || lm.lastLogPostDateTCT || meta.lastLogPostDateTCT || null;
+            if (meta.lastLogPostDateTCT) meta.lastPostDateTCT = meta.lastLogPostDateTCT;
+            if (lm.logClaimDate && rm.logClaimDate && lm.logClaimDate === rm.logClaimDate) {
+                const lts = Number(lm.logClaimTs) || 0;
+                const rts = Number(rm.logClaimTs) || 0;
+                const winner = (lts && (!rts || lts <= rts)) ? lm : rm;
+                meta.logClaimId = winner.logClaimId;
+                meta.logClaimTs = winner.logClaimTs;
+                meta.logClaimDate = winner.logClaimDate;
+            }
+            base.meta = meta;
+            base.updatedAt = Math.max(lt, rt);
+            return base;
+        },
+        _tombMap(list, field) {
+            const m = new Map();
+            for (const t of list || []) {
+                const id = String(t[field] != null ? t[field] : t.id);
+                const prev = m.get(id);
+                if (!prev || (t.updatedAt || 0) >= (prev.updatedAt || 0)) m.set(id, t);
+            }
+            return m;
+        },
+        mergeData(local, remote) {
+            const L = local || this.emptyData();
+            const R = remote || this.emptyData();
+            const out = this.emptyData();
+            const tombs = {
+                trained_log: [],
+                train_sales: [],
+                paid_contracts: [],
+                snapshots: []
+            };
+            const takeTombs = (name, field) => {
+                const map = this._tombMap([...(L.tombstones && L.tombstones[name] || []), ...(R.tombstones && R.tombstones[name] || [])], field);
+                tombs[name] = Array.from(map.values());
+                return map;
+            };
+            const logTombs = new Map();
+            for (const t of [...((L.tombstones || {}).trained_log || []), ...((R.tombstones || {}).trained_log || [])]) {
+                if (!t) continue;
+                const id = t.empId + '\0' + t.key;
+                const prev = logTombs.get(id);
+                if (!prev || (t.updatedAt || 0) >= (prev.updatedAt || 0)) logTombs.set(id, t);
+            }
+            tombs.trained_log = Array.from(logTombs.values());
+            const lIdx = this.indexLog(L.trained_log);
+            const rIdx = this.indexLog(R.trained_log);
+            const logOut = {};
+            const keys = new Set([...lIdx.keys(), ...rIdx.keys()]);
+            for (const k of keys) {
+                const tomb = logTombs.get(k);
+                const a = lIdx.get(k);
+                const b = rIdx.get(k);
+                let chosen = null;
+                if (a && b) chosen = (Number(b.updatedAt) || 0) >= (Number(a.updatedAt) || 0) ? b : a;
+                else chosen = a || b;
+                if (!chosen) continue;
+                if (tomb && (tomb.updatedAt || 0) >= (Number(chosen.updatedAt) || 0)) continue;
+                const empId = k.split('\0')[0];
+                if (!logOut[empId]) logOut[empId] = [];
+                logOut[empId].push(chosen);
+            }
+            for (const empId of Object.keys(logOut)) {
+                logOut[empId].sort((x, y) => String(x.date || '').localeCompare(String(y.date || '')) || ((x.ts || 0) - (y.ts || 0)));
+            }
+            out.trained_log = logOut;
+
+            const mergeRecords = (name, keyFn, special) => {
+                const tmap = takeTombs(name, name === 'snapshots' ? 'date' : 'id');
+                const map = new Map();
+                const add = (item) => {
+                    if (!item) return;
+                    const id = keyFn(item);
+                    if (!id) return;
+                    const prev = map.get(id);
+                    if (!prev) { map.set(id, { ...item }); return; }
+                    if (special) map.set(id, special(prev, item));
+                    else map.set(id, (Number(item.updatedAt) || 0) >= (Number(prev.updatedAt) || 0) ? { ...prev, ...item } : { ...item, ...prev });
+                };
+                for (const item of [...(R[name] || []), ...(L[name] || [])]) add(item);
+                const kept = [];
+                for (const [id, item] of map) {
+                    const tomb = tmap.get(String(id));
+                    if (tomb && (tomb.updatedAt || 0) >= (Number(item.updatedAt) || 0)) continue;
+                    kept.push(item);
+                }
+                out[name] = kept;
+            };
+            mergeRecords('train_sales', c => this.saleKey(c), (prev, item) => {
+                const pt = Number(prev.updatedAt) || 0;
+                const ct = Number(item.updatedAt) || 0;
+                const base = ct >= pt ? { ...prev, ...item } : { ...item, ...prev };
+                const pp = this._normPays(prev);
+                const cp = this._normPays(item);
+                const hasReal = pp.some(p => p.id !== 'prepaid') || cp.some(p => p.id !== 'prepaid');
+                base.payments = this._unionPayments(hasReal ? pp.filter(p => p.id !== 'prepaid') : pp, hasReal ? cp.filter(p => p.id !== 'prepaid') : cp);
+                base.prepaidAmount = base.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                base.updatedAt = Math.max(pt, ct);
+                return base;
+            });
+            mergeRecords('paid_contracts', c => this.saleKey(c));
+            mergeRecords('snapshots', s => s && s.date);
+
+            const pickObj = (key, special) => {
+                const a = L[key] || {};
+                const b = R[key] || {};
+                if (special) { out[key] = special(a, b); return; }
+                const at = Number(a.updatedAt) || 0;
+                const bt = Number(b.updatedAt) || 0;
+                out[key] = bt >= at ? { ...a, ...b } : { ...b, ...a };
+            };
+            pickObj('rotation', (a, b) => {
+                const at = Number(a.updatedAt) || 0;
+                const bt = Number(b.updatedAt) || 0;
+                const base = bt >= at ? { ...a, ...b } : { ...b, ...a };
+                base.excluded = Array.from(new Set([...(a.excluded || []), ...(b.excluded || [])]));
+                base.joinDates = { ...(b.joinDates || {}), ...(a.joinDates || {}) };
+                base.resetDates = { ...(b.resetDates || {}), ...(a.resetDates || {}) };
+                base.updatedAt = Math.max(at, bt);
+                return base;
+            });
+            pickObj('schedule_config');
+            pickObj('schedule_overrides');
+            pickObj('google_sync_cfg');
+            pickObj('discord_cfg', (a, b) => this.mergeDiscord(a, b));
+            pickObj('overrides');
+            pickObj('settings');
+            out.tombstones = tombs;
+            return out;
+        }
+    };
+    /*GIST_PURE_END*/
+
+    const GistSync = {
+        FILE: 'tcm-data.json',
+        TRACK: new Set(['trained_log', 'train_sales', 'paid_contracts', 'snapshots', 'rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']),
+        IGNORE: new Set(['gist_sync_cfg', 'gist_retry_queue', 'gist_local_snapshots', 'gist_stamps', 'gist_tombstones']),
+        _ready: false,
+        _started: false,
+        _applying: false,
+        _shadow: null,
+        _stamps: {},
+        _tombs: null,
+        _flight: null,
+        _again: null,
+        _debounce: 0,
+
+        getCfg() {
+            return Storage.get('gist_sync_cfg', {
+                token: '',
+                gistId: '',
+                enabled: true,
+                remoteUpdatedAt: '',
+                lastSync: null,
+                lastSyncOk: null,
+                lastError: null,
+                jsonbinMigrated: false
+            });
+        },
+        saveCfg(c) { Storage.set('gist_sync_cfg', c); },
+        ready() {
+            const c = this.getCfg();
+            return !!(c.token && c.gistId);
+        },
+        arm() {
+            if (this._ready) return;
+            this._stamps = Storage.get('gist_stamps', {}) || {};
+            this._tombs = Storage.get('gist_tombstones', null) || GistMerge.emptyData().tombstones;
+            this._shadow = this._clone(this._collect());
+            this._ready = true;
+        },
+        noteLocalChange(key) {
+            if (!this._ready || this._applying) return;
+            if (this.IGNORE.has(key) || !this.TRACK.has(key)) return;
+            const nextAll = this._collect();
+            const prevAll = this._shadow || nextAll;
+            const before = JSON.stringify(this._stamps) + '|' + JSON.stringify(this._tombs || {});
+            const diff = GistMerge.stampFromShadow(prevAll, nextAll, { ...this._stamps }, JSON.parse(JSON.stringify(this._tombs || GistMerge.emptyData().tombstones)));
+            this._stamps = diff.stamps;
+            this._tombs = diff.tombs;
+            const after = JSON.stringify(this._stamps) + '|' + JSON.stringify(this._tombs || {});
+            this._shadow = this._clone(nextAll);
+            if (before === after) return;
+            this._applying = true;
+            try {
+                Storage.set('gist_stamps', this._stamps);
+                Storage.set('gist_tombstones', this._tombs);
+            } finally { this._applying = false; }
+            this.schedulePush();
+        },
+        schedulePush() {
+            if (!this.ready()) return;
+            clearTimeout(this._debounce);
+            this._debounce = setTimeout(() => { this.syncNow('change').catch(() => {}); }, 5000);
+        },
+        start() {
+            if (this._started) return;
+            this._started = true;
+            this.arm();
+            window.addEventListener('focus', () => this.onForeground('focus'));
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') this.onForeground('visible');
+            });
+            this._retryTimer = setInterval(() => this._drainQueue(), 20000);
+            this.maybeMigrateJsonBin()
+                .catch(e => console.warn('[TCM] gist migrate', e))
+                .then(() => this.onForeground('startup'));
+        },
+        onForeground(reason) {
+            if (!this.ready()) return;
+            this._drainQueue();
+            this.syncNow(reason || 'foreground').catch(() => {});
+        },
+        syncNow(reason) {
+            if (this._flight) {
+                this._again = reason || this._again || 'followup';
+                return this._flight;
+            }
+            this._flight = this._doSync(reason).finally(() => {
+                this._flight = null;
+                if (this._again) {
+                    const next = this._again;
+                    this._again = null;
+                    this.syncNow(next);
+                }
+            });
+            return this._flight;
+        },
+        async createGist() {
+            const cfg = this.getCfg();
+            if (!cfg.token) throw new Error('Add a GitHub token with the gist scope first.');
+            if (cfg.gistId) return cfg.gistId;
+            this.arm();
+            const bundle = {
+                schema: 1,
+                script: 'TCM-ALPHA',
+                scriptVersion: TCM.VERSION,
+                updatedAt: Date.now(),
+                data: this._decorate(this._collect())
+            };
+            const res = await this._request(cfg, 'POST', 'https://api.github.com/gists', {
+                description: 'TCM ALPHA private sync',
+                public: false,
+                files: { 'tcm-data.json': { content: GistCodec.encodeBundle(bundle) } }
+            });
+            const gist = res.data || {};
+            if (!gist.id) throw new Error('GitHub did not return a gist id');
+            cfg.gistId = gist.id;
+            cfg.remoteUpdatedAt = gist.updated_at || '';
+            cfg.lastSync = new Date().toISOString();
+            cfg.lastSyncOk = true;
+            cfg.lastError = null;
+            this.saveCfg(cfg);
+            this._persistStampsFrom(bundle.data);
+            this._shadow = this._clone(this._collect());
+            return cfg.gistId;
+        },
+        async maybeMigrateJsonBin() {
+            const cfg = this.getCfg();
+            if (!cfg.token || !cfg.gistId || cfg.jsonbinMigrated) return;
+            const jb = JsonBinSync.getCfg();
+            if (!jb.binId || !jb.masterKey) {
+                cfg.jsonbinMigrated = true;
+                this.saveCfg(cfg);
+                return;
+            }
+            const remote = await JsonBinSync.pull();
+            this._applying = true;
+            try { JsonBinSync.applyRemote(remote); }
+            finally { this._applying = false; }
+            this._shadow = this._clone(this._collect());
+            this._stampAllNow();
+            cfg.jsonbinMigrated = true;
+            this.saveCfg(cfg);
+            jb.enabled = false;
+            JsonBinSync.saveCfg(jb);
+            await this.syncNow('jsonbin-migrate');
+        },
+        listSnapshots() {
+            return Storage.get('gist_local_snapshots', []) || [];
+        },
+        restoreSnapshot(idx) {
+            const snaps = this.listSnapshots();
+            const snap = snaps[idx];
+            if (!snap || !snap.data) throw new Error('Snapshot not found');
+            const data = this._decorate(snap.data);
+            data.tombstones = JSON.parse(JSON.stringify(this._tombs || GistMerge.emptyData().tombstones));
+            this._apply(data);
+            this.schedulePush();
+        },
+        settingsHTML() {
+            const cfg = this.getCfg();
+            const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+            const when = cfg.lastSync ? new Date(cfg.lastSync).toLocaleString() : 'never';
+            const q = (Storage.get('gist_retry_queue', []) || [])[0];
+            const retry = q ? (' · retry #' + q.attempt + ' at ' + new Date(q.nextAt).toLocaleTimeString()) : '';
+            const snaps = this.listSnapshots();
+            const snapRows = snaps.length ? snaps.map((s, i) =>
+                '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin:3px 0;">' +
+                '<span>' + esc(new Date(s.at).toLocaleString()) + ' · ' + esc(s.reason || 'snapshot') + '</span>' +
+                '<button type="button" class="tcm-btn tcm-gist-restore" data-idx="' + i + '">Restore</button></div>'
+            ).join('') : '<div style="color:#666;">No local snapshots yet.</div>';
+            return '<div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">' +
+                'Primary sync is a <strong>private GitHub Gist</strong> (<code>tcm-data.json</code>). ' +
+                'Create a token with <strong>gist scope only</strong> (classic) or a fine-grained token with ' +
+                '<strong>Gists: Read and write</strong>. The token stays on this device and is never uploaded. ' +
+                'API keys are not synced.</div>' +
+                '<label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">GitHub token</label>' +
+                '<input class="tcm-input" id="tcm-gist-token" type="password" autocomplete="off" placeholder="ghp_… or github_pat_…"' +
+                ' value="' + esc(cfg.token) + '" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />' +
+                '<label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">Gist ID</label>' +
+                '<input class="tcm-input" id="tcm-gist-id" type="text" placeholder="created automatically, or paste an existing id"' +
+                ' value="' + esc(cfg.gistId) + '" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />' +
+                '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">' +
+                '<button type="button" class="tcm-btn green" id="tcm-gist-save">Save</button>' +
+                '<button type="button" class="tcm-btn" id="tcm-gist-create">Create gist</button>' +
+                '<button type="button" class="tcm-btn" id="tcm-gist-now">⇄ Sync Now</button></div>' +
+                '<div id="tcm-gist-status" style="font-size:11px;color:#888;margin-bottom:8px;">Last sync: ' +
+                '<span style="color:' + (cfg.lastSyncOk ? '#7eb8ff' : (cfg.lastSync ? '#fc6' : '#888')) + ';">' + esc(when) +
+                (cfg.lastSync ? (cfg.lastSyncOk ? ' ✓' : ' ⚠ failed') : '') + '</span>' +
+                (cfg.lastError ? '<span style="color:#f88;"> — ' + esc(String(cfg.lastError).slice(0, 180)) + '</span>' : '') +
+                esc(retry) + '</div>' +
+                '<div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:4px 0;">Local snapshots (last 5)</div>' +
+                '<div id="tcm-gist-snaps" style="font-size:11px;color:#ccc;margin-bottom:8px;">' + snapRows + '</div>';
+        },
+        readForm() {
+            const cfg = this.getCfg();
+            const token = (tcmById('tcm-gist-token')?.value || '').trim();
+            const gistId = (tcmById('tcm-gist-id')?.value || '').trim();
+            if (token) cfg.token = token;
+            cfg.gistId = gistId;
+            this.saveCfg(cfg);
+            return cfg;
+        },
+        bindSettings(ui) {
+            const rerender = () => setTimeout(() => ui._renderSettings(), 400);
+            tcmById('tcm-gist-save')?.addEventListener('click', () => {
+                this.readForm();
+                const btn = tcmById('tcm-gist-save');
+                if (btn) btn.textContent = '✓ Saved';
+                rerender();
+            });
+            tcmById('tcm-gist-create')?.addEventListener('click', async () => {
+                const btn = tcmById('tcm-gist-create');
+                if (btn) { btn.disabled = true; btn.textContent = '…creating'; }
+                try {
+                    this.readForm();
+                    const id = await this.createGist();
+                    const field = tcmById('tcm-gist-id');
+                    if (field) field.value = id;
+                    if (btn) btn.textContent = '✓ Created';
+                    this.maybeMigrateJsonBin().catch(e => console.warn('[TCM] gist migrate', e));
+                    rerender();
+                } catch (e) {
+                    this._rememberError(e);
+                    if (btn) { btn.disabled = false; btn.textContent = '✗ Failed'; }
+                    alert('Create gist failed: ' + (e.message || e));
+                    rerender();
+                }
+            });
+            tcmById('tcm-gist-now')?.addEventListener('click', async () => {
+                const btn = tcmById('tcm-gist-now');
+                if (btn) { btn.disabled = true; btn.textContent = '…syncing'; }
+                try {
+                    this.readForm();
+                    if (!this.ready()) throw new Error('Token and Gist ID are required. Use Create gist if you do not have an id yet.');
+                    await this.syncNow('manual');
+                    if (btn) btn.textContent = '✓ Synced';
+                    rerender();
+                } catch (e) {
+                    if (btn) { btn.disabled = false; btn.textContent = '✗ Failed'; }
+                    alert('Gist sync failed: ' + (e.message || e));
+                    rerender();
+                }
+            });
+            document.querySelectorAll('.tcm-gist-restore').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const idx = Number(btn.getAttribute('data-idx'));
+                    if (!confirm('Restore this local snapshot? Current synced data on this device will be replaced, then pushed.')) return;
+                    try {
+                        this.restoreSnapshot(idx);
+                        rerender();
+                    } catch (e) {
+                        alert('Restore failed: ' + (e.message || e));
+                    }
+                });
+            });
+        },
+
+        async _doSync() {
+            const cfg = this.getCfg();
+            if (!cfg.token || !cfg.gistId) return { skipped: true };
+            this.arm();
+            let remoteInfo;
+            try { remoteInfo = await this._fetchGist(cfg); }
+            catch (e) { this._fail(cfg, e); throw e; }
+            let localData = this._decorate(this._collect());
+            const remoteData = remoteInfo.bundle && (remoteInfo.bundle.data || remoteInfo.bundle);
+            const revisionChanged = !!(remoteInfo.updated_at && cfg.remoteUpdatedAt && remoteInfo.updated_at !== cfg.remoteUpdatedAt);
+            if (remoteData) {
+                const merged = GistMerge.mergeData(localData, remoteData);
+                const localChanged = GistMerge.stable(merged) !== GistMerge.stable(localData);
+                if (revisionChanged && localChanged) this._saveSnapshot(this._collect(), 'pre-merge');
+                if (localChanged || revisionChanged) {
+                    if (localChanged) this._apply(merged);
+                    localData = merged;
+                }
+                if (!revisionChanged && !localChanged && GistMerge.stable(localData) === GistMerge.stable(remoteData)) {
+                    this._markOk(cfg, remoteInfo.updated_at);
+                    return { unchanged: true };
+                }
+            }
+            try {
+                const again = await this._fetchGist(cfg);
+                if (again.updated_at && again.updated_at !== remoteInfo.updated_at && again.bundle) {
+                    const remote2 = again.bundle.data || again.bundle;
+                    const merged2 = GistMerge.mergeData(localData, remote2);
+                    if (GistMerge.stable(merged2) !== GistMerge.stable(localData)) {
+                        this._saveSnapshot(this._collect(), 'pre-merge');
+                        this._apply(merged2);
+                    }
+                    localData = merged2;
+                    remoteInfo = again;
+                }
+            } catch (e) { this._fail(cfg, e); throw e; }
+            const bundle = {
+                schema: 1,
+                script: 'TCM-ALPHA',
+                scriptVersion: TCM.VERSION,
+                updatedAt: Date.now(),
+                data: localData
+            };
+            const content = GistCodec.encodeBundle(bundle);
+            if (remoteInfo.content === content) {
+                this._markOk(cfg, remoteInfo.updated_at);
+                return { unchanged: true };
+            }
+            let patched;
+            try { patched = await this._patch(cfg, content); }
+            catch (e) { this._fail(cfg, e); throw e; }
+            this._markOk(cfg, (patched.data && patched.data.updated_at) || remoteInfo.updated_at);
+            this._persistStampsFrom(localData);
+            this._shadow = this._clone(this._collect());
+            return { pushed: true };
+        },
+        _markOk(cfg, updatedAt) {
+            cfg.lastSync = new Date().toISOString();
+            cfg.lastSyncOk = true;
+            cfg.lastError = null;
+            if (updatedAt) cfg.remoteUpdatedAt = updatedAt;
+            this.saveCfg(cfg);
+            Storage.set('gist_retry_queue', []);
+            this._paintStatus();
+        },
+        _rememberError(e) {
+            const cfg = this.getCfg();
+            cfg.lastSync = new Date().toISOString();
+            cfg.lastSyncOk = false;
+            cfg.lastError = (e && e.message) || String(e);
+            this.saveCfg(cfg);
+            this._paintStatus();
+        },
+        _fail(cfg, e) {
+            this._rememberError(e);
+            const status = e && e.status;
+            const msg = (e && e.message) || '';
+            const rate = status === 429 || (status === 403 && /rate limit/i.test(msg));
+            const auth = status === 401 || (status === 403 && !rate) || status === 404;
+            if (auth) return;
+            const q = Storage.get('gist_retry_queue', []) || [];
+            const attempt = ((q[0] && q[0].attempt) || 0) + 1;
+            let delay = Math.min(15 * 60 * 1000, 5000 * Math.pow(2, Math.min(attempt, 8) - 1));
+            const headers = (e && e.headers) || '';
+            const ra = /retry-after:\s*(\d+)/i.exec(headers);
+            if (ra) delay = Math.max(delay, Number(ra[1]) * 1000);
+            const reset = /x-ratelimit-reset:\s*(\d+)/i.exec(headers);
+            if (reset) {
+                const wait = Number(reset[1]) * 1000 - Date.now();
+                if (wait > 0 && wait < 60 * 60 * 1000) delay = Math.max(delay, wait);
+            }
+            Storage.set('gist_retry_queue', [{ id: 'sync', attempt: attempt, nextAt: Date.now() + delay, reason: msg.slice(0, 80) }]);
+        },
+        _drainQueue() {
+            if (!this.ready() || this._flight) return;
+            const q = Storage.get('gist_retry_queue', []) || [];
+            if (!q.length || Date.now() < (q[0].nextAt || 0)) return;
+            this.syncNow('retry').catch(() => {});
+        },
+        _paintStatus() {
+            const el = tcmById('tcm-gist-status');
+            if (!el) return;
+            const cfg = this.getCfg();
+            const when = cfg.lastSync ? new Date(cfg.lastSync).toLocaleString() : 'never';
+            el.textContent = 'Last sync: ' + when + (cfg.lastSync ? (cfg.lastSyncOk ? ' ✓' : ' ⚠ failed') : '') + (cfg.lastError ? ' — ' + cfg.lastError : '');
+        },
+        _saveSnapshot(data, reason) {
+            const snaps = this.listSnapshots();
+            snaps.unshift({ at: Date.now(), reason: reason || 'snapshot', data: this._clone(data) });
+            Storage.set('gist_local_snapshots', snaps.slice(0, 5));
+        },
+        _stampAllNow() {
+            const now = Date.now();
+            const raw = this._collect();
+            const stamps = { ...this._stamps };
+            for (const empId of Object.keys(raw.trained_log || {})) {
+                for (const e of raw.trained_log[empId] || []) {
+                    const k = GistMerge.logKey(e);
+                    if (k) stamps['log:' + empId + '\0' + k] = now;
+                }
+            }
+            for (const item of raw.train_sales || []) stamps['train_sales:' + GistMerge.saleKey(item)] = now;
+            for (const item of raw.paid_contracts || []) stamps['paid_contracts:' + GistMerge.saleKey(item)] = now;
+            for (const item of raw.snapshots || []) if (item && item.date) stamps['snapshots:' + item.date] = now;
+            for (const key of ['rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']) stamps[key] = now;
+            this._stamps = stamps;
+            this._applying = true;
+            try { Storage.set('gist_stamps', stamps); }
+            finally { this._applying = false; }
+            this._shadow = this._clone(raw);
+        },
+        _collect() {
+            const strip = (obj) => {
+                const out = JSON.parse(JSON.stringify(obj || {}));
+                for (const k of Object.keys(out)) {
+                    if (k === 'updatedAt' || GistMerge.SECRET.has(k)) { delete out[k]; continue; }
+                    if (/key|secret|token|password/i.test(k) && typeof out[k] === 'string' && out[k].length > 24) delete out[k];
+                }
+                return out;
+            };
+            return {
+                trained_log: Storage.getTrainedLog() || {},
+                train_sales: Storage.getTrainSales() || [],
+                paid_contracts: Storage.getPaidContracts() || [],
+                snapshots: Storage.getSnapshots() || [],
+                rotation: Storage.getRotation() || {},
+                schedule_config: (typeof Storage.getScheduleConfig === 'function' ? Storage.getScheduleConfig() : Storage.get('schedule_config', {})) || {},
+                schedule_overrides: (typeof Storage.getScheduleOverrides === 'function' ? Storage.getScheduleOverrides() : Storage.get('schedule_overrides', {})) || {},
+                google_sync_cfg: strip(Storage.get('google_sync_cfg', {}) || {}),
+                discord_cfg: Storage.get('discord_cfg', {}) || {},
+                overrides: (typeof Storage.getOverrides === 'function' ? Storage.getOverrides() : Storage.get('overrides', {})) || {},
+                settings: strip(Storage.getSettings() || {})
+            };
+        },
+        _decorate(raw) {
+            const stamps = this._stamps || {};
+            const data = GistMerge.emptyData();
+            data.tombstones = JSON.parse(JSON.stringify(this._tombs || data.tombstones));
+            const log = {};
+            for (const empId of Object.keys(raw.trained_log || {})) {
+                log[empId] = (raw.trained_log[empId] || []).map(e => ({
+                    ...e,
+                    updatedAt: stamps['log:' + empId + '\0' + GistMerge.logKey(e)] || e.updatedAt || 0
+                }));
+            }
+            data.trained_log = log;
+            const stampList = (name, keyFn) => (raw[name] || []).map(item => {
+                const id = keyFn(item);
+                return { ...item, updatedAt: stamps[name + ':' + id] || item.updatedAt || 0 };
+            });
+            data.train_sales = stampList('train_sales', c => GistMerge.saleKey(c));
+            data.paid_contracts = stampList('paid_contracts', c => GistMerge.saleKey(c));
+            data.snapshots = stampList('snapshots', s => s && s.date);
+            for (const key of ['rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']) {
+                data[key] = { ...(raw[key] || {}), updatedAt: stamps[key] || 0 };
+            }
+            return data;
+        },
+        _persistStampsFrom(data) {
+            const stamps = {};
+            for (const empId of Object.keys(data.trained_log || {})) {
+                for (const e of data.trained_log[empId] || []) {
+                    const k = GistMerge.logKey(e);
+                    if (k) stamps['log:' + empId + '\0' + k] = e.updatedAt || 0;
+                }
+            }
+            for (const item of data.train_sales || []) stamps['train_sales:' + GistMerge.saleKey(item)] = item.updatedAt || 0;
+            for (const item of data.paid_contracts || []) stamps['paid_contracts:' + GistMerge.saleKey(item)] = item.updatedAt || 0;
+            for (const item of data.snapshots || []) if (item && item.date) stamps['snapshots:' + item.date] = item.updatedAt || 0;
+            for (const key of ['rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']) {
+                stamps[key] = (data[key] && data[key].updatedAt) || 0;
+            }
+            this._stamps = stamps;
+            this._tombs = data.tombstones || GistMerge.emptyData().tombstones;
+            this._applying = true;
+            try {
+                Storage.set('gist_stamps', stamps);
+                Storage.set('gist_tombstones', this._tombs);
+            } finally { this._applying = false; }
+        },
+        _stripUpdated(obj) {
+            if (!obj || typeof obj !== 'object') return obj;
+            const out = Array.isArray(obj) ? obj.map(x => this._stripUpdated(x)) : { ...obj };
+            if (!Array.isArray(out)) delete out.updatedAt;
+            return out;
+        },
+        _apply(data) {
+            this._applying = true;
+            try {
+                Storage.set('trained_log', this._stripUpdated(data.trained_log || {}));
+                Storage.saveTrainSales(this._stripUpdated(data.train_sales || []));
+                Storage.set('paid_contracts', this._stripUpdated(data.paid_contracts || []));
+                const snaps = this._stripUpdated(data.snapshots || []);
+                Storage.set('snapshots', snaps);
+                try { localStorage.setItem('TCM_snapshots_mirror', JSON.stringify(snaps)); } catch (e) {}
+                if (data.rotation) Storage.saveRotation(this._stripUpdated(data.rotation));
+                if (data.schedule_config && typeof Storage.saveScheduleConfig === 'function') Storage.saveScheduleConfig(this._stripUpdated(data.schedule_config));
+                if (data.schedule_overrides && typeof Storage.saveScheduleOverrides === 'function') Storage.saveScheduleOverrides(this._stripUpdated(data.schedule_overrides));
+                if (data.google_sync_cfg) {
+                    const g = Storage.get('google_sync_cfg', {}) || {};
+                    Storage.set('google_sync_cfg', { ...g, ...this._stripUpdated(data.google_sync_cfg) });
+                }
+                if (data.discord_cfg) {
+                    const d = Storage.get('discord_cfg', {}) || {};
+                    const inc = this._stripUpdated(data.discord_cfg) || {};
+                    Storage.set('discord_cfg', {
+                        ...d,
+                        ...inc,
+                        opts: { ...(d.opts || {}), ...(inc.opts || {}) },
+                        meta: { ...(d.meta || {}), ...(inc.meta || {}) }
+                    });
+                }
+                if (data.overrides) Storage.set('overrides', this._stripUpdated(data.overrides));
+                if (data.settings) {
+                    const local = Storage.getSettings() || {};
+                    const inc = this._stripUpdated(data.settings) || {};
+                    const next = { ...local };
+                    for (const k of Object.keys(inc)) {
+                        if (GistMerge.SECRET.has(k)) continue;
+                        next[k] = inc[k];
+                    }
+                    Storage.saveSettings(next);
+                }
+                this._persistStampsFrom(data);
+            } finally {
+                this._applying = false;
+                this._shadow = this._clone(this._collect());
+            }
+        },
+        _clone(v) { return JSON.parse(JSON.stringify(v || null)); },
+        async _fetchGist(cfg) {
+            const res = await this._request(cfg, 'GET', 'https://api.github.com/gists/' + encodeURIComponent(cfg.gistId));
+            const gist = res.data || {};
+            const file = gist.files && gist.files[this.FILE];
+            let content = (file && file.content) || '';
+            if (file && file.truncated && file.raw_url) {
+                const raw = await this._request(cfg, 'GET', file.raw_url);
+                content = typeof raw.data === 'string' ? raw.data : (raw.data ? JSON.stringify(raw.data) : '');
+            }
+            let bundle = null;
+            if (content && String(content).trim()) {
+                try { bundle = GistCodec.decodeBundle(content); }
+                catch (e) {
+                    const err = new Error('Could not read tcm-data.json: ' + (e.message || e));
+                    err.status = 422;
+                    throw err;
+                }
+            }
+            return { updated_at: gist.updated_at || '', content: content || '', bundle: bundle };
+        },
+        _patch(cfg, content) {
+            return this._request(cfg, 'PATCH', 'https://api.github.com/gists/' + encodeURIComponent(cfg.gistId), {
+                files: { 'tcm-data.json': { content: content } }
+            });
+        },
+        _request(cfg, method, url, body) {
+            return new Promise((resolve, reject) => {
+                _tcmGmXhr({
+                    method: method,
+                    url: url,
+                    headers: {
+                        'Accept': 'application/vnd.github+json',
+                        'Authorization': 'Bearer ' + cfg.token,
+                        'X-GitHub-Api-Version': '2022-11-28',
+                        'User-Agent': 'TCM-ALPHA',
+                        'Content-Type': 'application/json'
+                    },
+                    data: body != null ? JSON.stringify(body) : undefined,
+                    timeout: 30000,
+                    onload(res) {
+                        let data = null;
+                        const text = res.responseText || '';
+                        try { data = JSON.parse(text); } catch (e) { data = text; }
+                        const headers = res.responseHeaders || '';
+                        const status = res.status || 0;
+                        if (status >= 200 && status < 300) {
+                            if (data && typeof data === 'object' && data.message && !data.id && !data.files) {
+                                const err = new Error(data.message);
+                                err.status = /rate limit/i.test(data.message) ? 429 : (status || 403);
+                                err.headers = headers;
+                                err.data = data;
+                                reject(err);
+                                return;
+                            }
+                            resolve({ status: status, data: data, headers: headers });
+                            return;
+                        }
+                        const err = new Error('GitHub HTTP ' + status + (data && data.message ? ': ' + data.message : ''));
+                        err.status = status;
+                        err.headers = headers;
+                        err.data = data;
+                        reject(err);
+                    },
+                    onerror() { const err = new Error('Network error'); err.status = 0; reject(err); },
+                    ontimeout() { const err = new Error('Timeout'); err.status = 0; reject(err); }
+                });
+            });
+        }
+    };
+    _tcmAfterStorageSet = function (key) { GistSync.noteLocalChange(key); };
+    try { GistSync.arm(); } catch (e) { console.warn('[TCM] gist arm', e); }
 
     const GoogleSync = {
         getCfg() {
@@ -14702,9 +15718,12 @@ color:#ddd;padding:4px 6px;font-size:12px;text-align:center;font-family:'JetBrai
 <button class="tcm-btn red" id="tcm-clear-log" style="margin-top:0;margin-bottom:6px;">Clear Training Log</button>
 <button class="tcm-btn red" id="tcm-clear-debt" style="margin-top:0;margin-bottom:12px;">Clear Debt / Rotation</button>
 <hr class="tcm-divider">
-                <div class="tcm-section-label">JSONBin Data Sync</div>
+                <div class="tcm-section-label">GitHub Gist Sync</div>
+${GistSync.settingsHTML()}
+<hr class="tcm-divider">
+<div class="tcm-section-label">JSONBin (optional fallback)</div>
                 <div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">
-                    Live two-way sync for <strong>all settings</strong>, <strong>train logs</strong>, <strong>contracts</strong>,
+                    Optional fallback, off unless you enable it below. Gist is the primary sync. Still covers <strong>settings</strong>, <strong>train logs</strong>, <strong>contracts</strong>,
                     <strong>rotation</strong>, and <strong>finance snapshots</strong> across browsers / Torn PDA.<br>
                     Create a free bin at <a href="https://jsonbin.io" target="_blank" rel="noopener" style="color:#7eb8ff;">jsonbin.io</a>
                     (paste the Bin ID + Master Key below). API keys and secrets are <strong>never</strong> uploaded.
@@ -15173,6 +16192,7 @@ tcmById('tcm-gsync-copy-btn')?.addEventListener('click', function() {
                 if (st) { st.style.color = '#aaa'; st.textContent = 'Panel message id cleared — next post creates a new panel message.'; }
             });
 
+            GistSync.bindSettings(this);
             tcmById('tcm-jsonbin-save')?.addEventListener('click', () => {
                 const cfg = JsonBinSync.getCfg();
                 cfg.binId = (tcmById('tcm-jsonbin-id')?.value || '').trim();
@@ -17622,6 +18642,7 @@ if (!this._visListenerAdded) {
 this._visListenerAdded = true;
 document.addEventListener('visibilitychange', () => {
 if (document.visibilityState !== 'visible') return;
+try { GistSync.onForeground('visible'); } catch (e) {}
 if (!Storage.getApiKey()) return;
 if (Date.now() >= this._nextRefreshAt) {
 this._nextRefreshAt = Date.now() + this.AUTO_REFRESH_SECS * 1000;
@@ -18445,6 +19466,8 @@ UI._currentTab = 'overview';
 App._startCountdown();
             App._startHourlyRefresh();
             App._startProxyAutoRefresh();
+
+            try { GistSync.start(); } catch (e) { console.warn('[TCM] gist start', e); }
 
             setTimeout(() => {
                 const cached = _tcmGmGet('TCM_update_available', '');
