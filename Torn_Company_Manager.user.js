@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.12.0-beta
+// @version      10.12.1-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -117,18 +117,67 @@
         _tcmTombstones.forEach(function (k) { keys.delete(k); });
         return Array.from(keys);
     }
+    function _tcmErrText(err) {
+        if (err == null || err === '') return 'Network error';
+        if (typeof err === 'string') return err;
+        const bits = [];
+        if (err.name && err.name !== 'Error') bits.push(err.name);
+        if (err.message) bits.push(String(err.message));
+        else bits.push(String(err));
+        if (err.status) bits.push('HTTP ' + err.status);
+        const body = err.responseText || (err.data && (err.data.message || err.data));
+        if (body && typeof body !== 'object') bits.push(String(body).slice(0, 180));
+        return bits.filter(Boolean).join(': ').slice(0, 400);
+    }
+    // TornPDA's PDA_http* handlers return {status, statusText, responseText, responseHeaders}.
+    // Older builds and some shims resolve the raw body string instead.
+    function _tcmNormalizePdaResult(result) {
+        if (result == null) return { status: 0, statusText: '', responseText: '', responseHeaders: '' };
+        if (typeof result === 'string') {
+            return { status: 200, statusText: 'OK', responseText: result, responseHeaders: '' };
+        }
+        if (typeof result === 'object') {
+            let text = '';
+            if (result.responseText != null) text = String(result.responseText);
+            else if (typeof result.body === 'string') text = result.body;
+            else if (result.body != null) text = JSON.stringify(result.body);
+            const statusNum = Number(result.status);
+            return {
+                status: Number.isFinite(statusNum) ? statusNum : 200,
+                statusText: result.statusText || '',
+                responseText: text,
+                responseHeaders: typeof result.responseHeaders === 'string' ? result.responseHeaders : ''
+            };
+        }
+        return { status: 200, statusText: '', responseText: String(result), responseHeaders: '' };
+    }
+    function _tcmPdaCaller(method) {
+        const names = { GET: 'PDA_httpGet', POST: 'PDA_httpPost', PUT: 'PDA_httpPut', PATCH: 'PDA_httpPatch', DELETE: 'PDA_httpDelete' };
+        const name = names[method];
+        if (!name) return null;
+        const needsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
+        if (typeof window[name] === 'function') {
+            return function (url, headers, body) {
+                return needsBody ? window[name](url, headers || {}, body) : window[name](url, headers || {});
+            };
+        }
+        const bridge = window.flutter_inappwebview && window.flutter_inappwebview.callHandler;
+        if (typeof bridge !== 'function') return null;
+        return function (url, headers, body) {
+            const args = needsBody ? [name, url, headers || {}, body] : [name, url, headers || {}];
+            return bridge.apply(window.flutter_inappwebview, args);
+        };
+    }
     function _tcmGmXhr(opts) {
-        if (_gmXhr) return _gmXhr(opts);
         opts = opts || {};
         const method = String(opts.method || 'GET').toUpperCase();
         const url = opts.url;
         const headers = opts.headers || {};
         const body = opts.data;
         let settled = false;
-        const finish = (status, text) => {
+        const finish = (res) => {
             if (settled) return;
             settled = true;
-            const res = { status: status, statusText: String(status), responseText: text == null ? '' : String(text), readyState: 4, finalUrl: url };
             if (opts.onload) opts.onload(res);
         };
         const fail = (err) => {
@@ -142,45 +191,76 @@
             if (opts.ontimeout) opts.ontimeout();
             else fail(new Error('Timeout'));
         }, opts.timeout) : 0;
-        const finishHdr = (status, text, hdrs) => {
+        const done = (norm) => {
             if (timer) clearTimeout(timer);
-            let responseHeaders = '';
-            if (typeof hdrs === 'string') responseHeaders = hdrs;
-            else if (hdrs && typeof hdrs.get === 'function') {
-                responseHeaders = ['retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining']
-                    .map(h => h + ': ' + (hdrs.get(h) || '')).join('\n');
-            }
-            if (settled) return;
-            settled = true;
-            const res = { status: status, statusText: String(status), responseText: text == null ? '' : String(text), readyState: 4, finalUrl: url, responseHeaders: responseHeaders };
-            if (opts.onload) opts.onload(res);
+            finish({
+                status: norm.status,
+                statusText: norm.statusText || String(norm.status),
+                responseText: norm.responseText == null ? '' : String(norm.responseText),
+                responseHeaders: norm.responseHeaders || '',
+                readyState: 4,
+                finalUrl: url
+            });
         };
-        const pdaGet = (typeof PDA_httpGet === 'function') ? PDA_httpGet : null;
-        const pdaPost = (typeof PDA_httpPost === 'function') ? PDA_httpPost : null;
-        const pdaReq = (typeof PDA_httpRequest === 'function') ? PDA_httpRequest : null;
-        const onOk = (text, status) => finishHdr(status == null ? 200 : status, text, '');
-        const onErr = (err) => { if (timer) clearTimeout(timer); fail(err); };
-        try {
-            if (pdaReq) {
-                Promise.resolve(pdaReq(method, url, headers, body)).then(t => onOk(t, 200), onErr);
+        const pda = _tcmPdaCaller(method);
+        // PATCH/PUT/DELETE must use TornPDA's native handlers. GM_xmlhttpRequest on
+        // older GMforPDA builds only implements GET/POST, and fetch() from torn.com
+        // is blocked by CORS. User-Agent is a forbidden fetch header.
+        const nativeFirst = method === 'PATCH' || method === 'PUT' || method === 'DELETE';
+        const runGm = () => new Promise((resolve, reject) => {
+            if (typeof _gmXhr !== 'function') { reject(new Error('GM_xmlhttpRequest missing')); return; }
+            try {
+                _gmXhr({
+                    method: method, url: url, headers: headers, data: body, timeout: opts.timeout,
+                    onload: (res) => resolve(_tcmNormalizePdaResult(res)),
+                    onerror: (err) => reject(err || new Error('GM_xmlhttpRequest error')),
+                    ontimeout: () => reject(new Error('Timeout'))
+                });
+            } catch (err) { reject(err); }
+        });
+        const runPda = () => {
+            if (!pda) return Promise.reject(new Error('no PDA ' + method + ' handler'));
+            return Promise.resolve(pda(url, headers, body)).then(_tcmNormalizePdaResult);
+        };
+        const runFetch = () => {
+            if (typeof fetch !== 'function') return Promise.reject(new Error('fetch missing'));
+            const fh = {};
+            for (const k of Object.keys(headers)) {
+                if (k.toLowerCase() === 'user-agent') continue;
+                fh[k] = headers[k];
+            }
+            return fetch(url, { method: method, headers: fh, body: method === 'GET' || method === 'DELETE' ? undefined : body })
+                .then(r => r.text().then(t => {
+                    let responseHeaders = '';
+                    try {
+                        responseHeaders = ['retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining']
+                            .map(h => h + ': ' + (r.headers.get(h) || '')).join('\n');
+                    } catch (e) {}
+                    return { status: r.status, statusText: r.statusText || '', responseText: t, responseHeaders: responseHeaders };
+                }));
+        };
+        const attempts = nativeFirst ? [runPda, runGm, runFetch] : [runGm, runPda, runFetch];
+        const errors = [];
+        const next = (i) => {
+            if (settled) return;
+            if (i >= attempts.length) {
+                if (timer) clearTimeout(timer);
+                fail(new Error(errors.join(' | ') || ('No HTTP API for ' + method)));
                 return;
             }
-            if (method === 'GET' && pdaGet) {
-                Promise.resolve(pdaGet(url, headers)).then(t => onOk(t, 200), onErr);
-                return;
-            }
-            if (method === 'POST' && pdaPost) {
-                Promise.resolve(pdaPost(url, headers, body)).then(t => onOk(t, 200), onErr);
-                return;
-            }
-            if (typeof fetch === 'function') {
-                fetch(url, { method: method, headers: headers, body: method === 'GET' ? undefined : body })
-                    .then(r => r.text().then(t => finishHdr(r.status, t, r.headers)))
-                    .catch(onErr);
-                return;
-            }
-        } catch (err) { onErr(err); return; }
-        onErr(new Error('No HTTP API (GM_xmlhttpRequest / PDA_httpGet / fetch)'));
+            attempts[i]().then(norm => {
+                if (norm && norm.status === 0 && !norm.responseText) {
+                    errors.push(method + ' empty status 0');
+                    next(i + 1);
+                    return;
+                }
+                done(norm);
+            }).catch(err => {
+                errors.push(_tcmErrText(err));
+                next(i + 1);
+            });
+        };
+        try { next(0); } catch (err) { fail(err); }
     }
     function _tcmGmStyle(css) {
         if (_gmStyle) { try { return _gmStyle(css); } catch (e) {} }
@@ -277,7 +357,7 @@
 
 
     const TCM = {
-        VERSION: '10.12.0-beta',
+        VERSION: '10.12.1-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -3598,7 +3678,7 @@ function runCapture() {
                 '<div id="tcm-gist-status" style="font-size:11px;color:#888;margin-bottom:8px;">Last sync: ' +
                 '<span style="color:' + (cfg.lastSyncOk ? '#7eb8ff' : (cfg.lastSync ? '#fc6' : '#888')) + ';">' + esc(when) +
                 (cfg.lastSync ? (cfg.lastSyncOk ? ' ✓' : ' ⚠ failed') : '') + '</span>' +
-                (cfg.lastError ? '<span style="color:#f88;"> — ' + esc(String(cfg.lastError).slice(0, 180)) + '</span>' : '') +
+                (cfg.lastError ? '<span style="color:#f88;"> — ' + esc(String(cfg.lastError).slice(0, 360)) + '</span>' : '') +
                 esc(retry) + '</div>' +
                 '<div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:4px 0;">Local snapshots (last 5)</div>' +
                 '<div id="tcm-gist-snaps" style="font-size:11px;color:#ccc;margin-bottom:8px;">' + snapRows + '</div>';
@@ -3950,9 +4030,8 @@ function runCapture() {
                     headers: {
                         'Accept': 'application/vnd.github+json',
                         'Authorization': 'Bearer ' + cfg.token,
-                        'X-GitHub-Api-Version': '2022-11-28',
-                        'User-Agent': 'TCM-ALPHA',
-                        'Content-Type': 'application/json'
+                    'X-GitHub-Api-Version': '2022-11-28',
+                    'Content-Type': 'application/json'
                     },
                     data: body != null ? JSON.stringify(body) : undefined,
                     timeout: 30000,
@@ -3980,8 +4059,14 @@ function runCapture() {
                         err.data = data;
                         reject(err);
                     },
-                    onerror() { const err = new Error('Network error'); err.status = 0; reject(err); },
-                    ontimeout() { const err = new Error('Timeout'); err.status = 0; reject(err); }
+                onerror(err) {
+                    const detail = _tcmErrText(err);
+                    const e = new Error(method + ' ' + url.replace(/^https?:\/\//, '').split('/')[0] + ': ' + detail);
+                    e.status = (err && err.status) || 0;
+                    e.headers = (err && (err.headers || err.responseHeaders)) || '';
+                    reject(e);
+                },
+                ontimeout() { const err = new Error(method + ' timed out'); err.status = 0; reject(err); }
                 });
             });
         }
