@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.12.1-beta
+// @version      10.12.2-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -40,6 +40,7 @@
     let _tcmFlushTimer = 0;
     const _tcmDom = new Map();
     const _tcmGetById = document.getElementById.bind(document);
+    let _tcmGistReqSeq = 0;
     const _gmGet = (typeof GM_getValue === 'function') ? GM_getValue : null;
     const _gmSet = (typeof GM_setValue === 'function') ? GM_setValue : null;
     const _gmDel = (typeof GM_deleteValue === 'function') ? GM_deleteValue : null;
@@ -218,9 +219,20 @@
                 });
             } catch (err) { reject(err); }
         });
+        // TornPDA's PDA_http* wrappers silently resolve undefined when the same request
+        // (same URL for GET) was sent in the last 2 seconds. GMforPDA routes through the
+        // same wrappers, so an undefined result means "deduped", not "failed": wait out
+        // the window and send it once more instead of reporting status 0.
+        const callPda = () => Promise.resolve(pda(url, headers, body));
         const runPda = () => {
             if (!pda) return Promise.reject(new Error('no PDA ' + method + ' handler'));
-            return Promise.resolve(pda(url, headers, body)).then(_tcmNormalizePdaResult);
+            return callPda().then(r => {
+                if (r !== undefined && r !== null) return _tcmNormalizePdaResult(r);
+                return new Promise(res => setTimeout(res, 2200)).then(callPda).then(r2 => {
+                    if (r2 === undefined || r2 === null) throw new Error(method + ' PDA returned no response (deduped twice)');
+                    return _tcmNormalizePdaResult(r2);
+                });
+            });
         };
         const runFetch = () => {
             if (typeof fetch !== 'function') return Promise.reject(new Error('fetch missing'));
@@ -239,7 +251,10 @@
                     return { status: r.status, statusText: r.statusText || '', responseText: t, responseHeaders: responseHeaders };
                 }));
         };
-        const attempts = nativeFirst ? [runPda, runGm, runFetch] : [runGm, runPda, runFetch];
+        // Inside TornPDA go straight to the native handler; GMforPDA would call the same
+        // deduping wrapper first and make the fallback look like a duplicate.
+        const inPda = !!pda && (typeof window.PDA_httpGet === 'function' || /TornPDA/i.test(navigator.userAgent || ''));
+        const attempts = (nativeFirst || inPda) ? [runPda, runGm, runFetch] : [runGm, runPda, runFetch];
         const errors = [];
         const next = (i) => {
             if (settled) return;
@@ -357,7 +372,7 @@
 
 
     const TCM = {
-        VERSION: '10.12.1-beta',
+        VERSION: '10.12.2-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -4023,16 +4038,23 @@ function runCapture() {
             });
         },
         _request(cfg, method, url, body) {
+            const hdrs = {
+                'Accept': 'application/vnd.github+json',
+                'Authorization': 'Bearer ' + cfg.token,
+                'X-GitHub-Api-Version': '2022-11-28'
+            };
+            if (body != null) hdrs['Content-Type'] = 'application/json';
+            // Unique GET URL per call so TornPDA's 2s duplicate-GET filter never swallows
+            // a fetch/verify pair; GitHub ignores the extra query parameter.
+            if (method === 'GET') {
+                _tcmGistReqSeq = (_tcmGistReqSeq + 1) % 1e6;
+                url += (url.indexOf('?') >= 0 ? '&' : '?') + '_tcm=' + Date.now().toString(36) + _tcmGistReqSeq;
+            }
             return new Promise((resolve, reject) => {
                 _tcmGmXhr({
                     method: method,
                     url: url,
-                    headers: {
-                        'Accept': 'application/vnd.github+json',
-                        'Authorization': 'Bearer ' + cfg.token,
-                    'X-GitHub-Api-Version': '2022-11-28',
-                    'Content-Type': 'application/json'
-                    },
+                    headers: hdrs,
                     data: body != null ? JSON.stringify(body) : undefined,
                     timeout: 30000,
                     onload(res) {
