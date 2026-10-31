@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.12.2-beta
+// @version      10.13.0-alpha
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -18,15 +18,14 @@
 // @connect      api.torn.com
 // @connect      discord.com
 // @connect      discordapp.com
-// @connect      api.jsonbin.io
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @run-at       document-idle
 // @license      MIT
-// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
-// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
+// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
+// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
 // ==/UserScript==
 
 (function () {
@@ -372,7 +371,7 @@
 
 
     const TCM = {
-        VERSION: '10.12.2-beta',
+        VERSION: '10.13.0-alpha',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -1367,6 +1366,29 @@ getTodayTrained() {
                 console.warn('[TCM] migrateContractPayments failed', e);
             }
         },
+        /**
+         * One-time: drop JSONBin config. Gist is the only sync.
+         * Also strips the old jsonbinMigrated flag from gist config.
+         */
+        migrateRemoveJsonBin() {
+            try {
+                if (this.get('legacy_bin_removed_v', '') === '10.13.0') return;
+                _tcmGmDel(TCM.NS + 'jsonbin_sync_cfg');
+                const keys = _tcmGmList() || [];
+                for (let i = 0; i < keys.length; i++) {
+                    if (/jsonbin/i.test(keys[i])) _tcmGmDel(keys[i]);
+                }
+                const gist = this.get('gist_sync_cfg', null);
+                if (gist && typeof gist === 'object' && Object.prototype.hasOwnProperty.call(gist, 'jsonbinMigrated')) {
+                    delete gist.jsonbinMigrated;
+                    this.set('gist_sync_cfg', gist);
+                }
+                this.set('legacy_bin_removed_v', '10.13.0');
+                console.log('[TCM] Removed stored JSONBin keys.');
+            } catch (e) {
+                console.warn('[TCM] migrateRemoveJsonBin failed', e);
+            }
+        },
         getPaidContracts() { return this.get('paid_contracts', []); },
         savePaidContract(c) {
             const all = this.getPaidContracts();
@@ -2162,8 +2184,6 @@ function runCapture() {
   // =========================================================================
 
 
-    // ---------- JSONBin Data Sync (Web ↔ PDA / multi-device) ----------
-
     // ---------- Discord panels (log + live panel webhooks) ----------
     const Discord = {
         DEFAULT_OPTS: {
@@ -2216,44 +2236,8 @@ function runCapture() {
             return id;
         },
 
-        _jsonBinReady() {
-            try {
-                const cfg = typeof JsonBinSync !== 'undefined' ? JsonBinSync.getCfg() : null;
-                return !!(cfg && cfg.enabled && cfg.binId && cfg.masterKey);
-            } catch (_e) { return false; }
-        },
-
-        async _pullDiscordMetaFromBin() {
-            if (!this._jsonBinReady()) return;
-            try {
-                const body = await JsonBinSync.pull();
-                if (body && body.discord_cfg && typeof body.discord_cfg === 'object') {
-                    const dLocal = Storage.get('discord_cfg', {}) || {};
-                    const remoteMeta = body.discord_cfg.meta || {};
-                    // Remote meta wins for claim / last-post coordination
-                    Storage.set('discord_cfg', {
-                        ...dLocal,
-                        ...body.discord_cfg,
-                        opts: { ...(dLocal.opts || {}), ...((body.discord_cfg.opts) || {}) },
-                        meta: { ...(dLocal.meta || {}), ...remoteMeta }
-                    });
-                }
-            } catch (e) {
-                console.warn('[TCM] Discord meta pull failed', e);
-            }
-        },
-
-        async _pushDiscordMetaToBin() {
-            if (!this._jsonBinReady()) return;
-            try {
-                await JsonBinSync.push(JsonBinSync.buildPayload());
-            } catch (e) {
-                console.warn('[TCM] Discord meta push failed', e);
-            }
-        },
-
         /**
-         * Coordinate permanent-log posts across devices via JSONBin (Morrakiu TCM logic).
+         * Coordinate permanent-log posts across devices via Gist sync.
          * Returns true if this client should post the daily log message.
          * force=true bypasses (manual post always allowed).
          */
@@ -2266,8 +2250,6 @@ function runCapture() {
             const _useGist = (typeof GistSync !== 'undefined' && GistSync.ready());
             if (_useGist) {
                 try { await GistSync.syncNow('log-claim-pull'); } catch (e) { console.warn('[TCM] gist claim pull', e); }
-            } else {
-                await this._pullDiscordMetaFromBin();
             }
 
             let meta = this.getMeta();
@@ -2303,19 +2285,6 @@ function runCapture() {
                     if (meta.logClaimDate === dateStr && meta.logClaimId && meta.logClaimId !== myId) return false;
                 } catch (e) {
                     console.warn('[TCM] gist log claim failed', e);
-                }
-            } else if (this._jsonBinReady()) {
-                try {
-                    await this._pushDiscordMetaToBin();
-                    await new Promise(r => setTimeout(r, 900));
-                    await this._pullDiscordMetaFromBin();
-                    meta = this.getMeta();
-                    if (meta.lastLogPostDateTCT === dateStr) return false;
-                    if (meta.logClaimDate === dateStr && meta.logClaimId && meta.logClaimId !== myId) {
-                        return false;
-                    }
-                } catch (e) {
-                    console.warn('[TCM] log claim coordinate failed', e);
                 }
             }
             return true;
@@ -2708,7 +2677,7 @@ function runCapture() {
             const errors = [];
             let meta = this.getMeta();
 
-            // Permanent log — once per TCT day across devices (JSONBin claim)
+            // Permanent log — once per TCT day across devices (Gist claim)
             if (hasLog) {
                 const mayPostLog = await this.shouldPostDailyLog(tct.dateStr, force);
                 if (!mayPostLog) {
@@ -2722,7 +2691,6 @@ function runCapture() {
                         // Share completion so other devices skip
                         try {
                             if (typeof GistSync !== 'undefined' && GistSync.ready()) await GistSync.syncNow('log-posted');
-                            else await this._pushDiscordMetaToBin();
                         } catch (_pe) { /* local mark still set */ }
                     } catch (e) {
                         errors.push('log: ' + (e.message || e));
@@ -2786,323 +2754,6 @@ function runCapture() {
             } catch (e) {
                 console.warn('[TCM] Discord auto-post error:', e);
             }
-        }
-    };
-
-    const JsonBinSync = {
-        getCfg() {
-            return Storage.get('jsonbin_sync_cfg', {
-                binId: '',
-                masterKey: '',
-                enabled: false,
-                lastSync: null,
-                lastSyncOk: null,
-                lastError: null
-            });
-        },
-        saveCfg(c) { Storage.set('jsonbin_sync_cfg', c); },
-
-        _headers(key) {
-            return {
-                'Content-Type': 'application/json',
-                'X-Master-Key': key,
-                'X-Bin-Meta': 'false'
-            };
-        },
-
-        _xhr(method, url, headers, body) {
-            return new Promise((resolve, reject) => {
-                const opts = {
-                    method,
-                    url,
-                    headers: headers || {},
-                    timeout: 20000,
-                    onload(res) {
-                        let data = null;
-                        try { data = JSON.parse(res.responseText); } catch (_e) { data = res.responseText; }
-                        if (res.status >= 200 && res.status < 300) resolve({ status: res.status, data });
-                        else {
-                            const err = new Error('HTTP ' + res.status + (typeof data === 'object' && data && data.message ? (': ' + data.message) : ''));
-                            err.status = res.status;
-                            err.data = data;
-                            reject(err);
-                        }
-                    },
-                    onerror() { reject(new Error('Network error')); },
-                    ontimeout() { reject(new Error('Timeout')); }
-                };
-                if (body != null) opts.data = typeof body === 'string' ? body : JSON.stringify(body);
-                _tcmGmXhr(opts);
-            });
-        },
-
-        /** Merge ALPHA trained_log: { empId: [{date,ts,_logId,...}, ...] } */
-        mergeTrainedLogs(local, remote) {
-            const out = {};
-            const ids = new Set([
-                ...Object.keys(local || {}),
-                ...Object.keys(remote || {})
-            ]);
-            for (const id of ids) {
-                const a = Array.isArray(local?.[id]) ? local[id] : [];
-                const b = Array.isArray(remote?.[id]) ? remote[id] : [];
-                const seen = new Set();
-                const merged = [];
-                for (const e of [...a, ...b]) {
-                    if (!e || typeof e !== 'object') continue;
-                    const key = e._logId || e.ts || (e.date + '|' + (e.note || '') + '|' + (e.amount || ''));
-                    if (seen.has(String(key))) continue;
-                    seen.add(String(key));
-                    merged.push(e);
-                }
-                merged.sort((x, y) => String(x.date || '').localeCompare(String(y.date || '')) || ((x.ts || 0) - (y.ts || 0)));
-                if (merged.length) out[id] = merged;
-            }
-            return out;
-        },
-
-        /** Normalize a contract's payments, including legacy prepaidAmount-only records. */
-        _normalizeContractPayments(c) {
-            if (!c) return [];
-            if (Array.isArray(c.payments) && c.payments.length) {
-                return c.payments
-                    .filter(p => p && Number(p.amount) > 0)
-                    .map(p => ({
-                        id: String(p.id || ('p_' + (p.ts || p.date || Math.random()))),
-                        amount: Number(p.amount) || 0,
-                        date: p.date || c.startDate || '',
-                        note: p.note || '',
-                        ts: Number(p.ts) || 0
-                    }));
-            }
-            if (Number(c.prepaidAmount) > 0) {
-                return [{
-                    id: 'prepaid',
-                    amount: Number(c.prepaidAmount) || 0,
-                    date: c.startDate || '',
-                    note: 'Prepaid at start',
-                    ts: 0
-                }];
-            }
-            return [];
-        },
-
-        /** Union payment histories by id. Never drop a payment that exists on either side. */
-        _unionPayments(a, b) {
-            const payMap = new Map();
-            for (const p of [...(a || []), ...(b || [])]) {
-                if (!p || !p.id) continue;
-                const key = String(p.id);
-                const old = payMap.get(key);
-                if (!old || (Number(p.ts) || 0) >= (Number(old.ts) || 0)) payMap.set(key, p);
-            }
-            return Array.from(payMap.values());
-        },
-
-        mergeTrainSales(local, remote) {
-            const map = new Map();
-            for (const c of [...(remote || []), ...(local || [])]) {
-                if (!c || !c.id) continue;
-                const prev = map.get(c.id);
-                if (!prev) {
-                    const copy = { ...c };
-                    copy.payments = this._normalizeContractPayments(c);
-                    copy.prepaidAmount = copy.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-                    map.set(c.id, copy);
-                    continue;
-                }
-                const pt = prev.updatedAt || prev.ts || 0;
-                const ct = c.updatedAt || c.ts || 0;
-                // Prefer newer contract for non-payment fields, but ALWAYS union payments
-                // so an upgrade / cross-device sync never drops payment history.
-                const base = ct >= pt ? { ...prev, ...c } : { ...c, ...prev };
-                const prevPays = this._normalizeContractPayments(prev);
-                const curPays = this._normalizeContractPayments(c);
-                // If either side already has a real payments array, do not also invent a
-                // duplicate "prepaid" entry from the other side's prepaidAmount sum.
-                const hasReal = prevPays.some(p => p.id !== 'prepaid') || curPays.some(p => p.id !== 'prepaid');
-                const prevFiltered = hasReal ? prevPays.filter(p => p.id !== 'prepaid') : prevPays;
-                const curFiltered = hasReal ? curPays.filter(p => p.id !== 'prepaid') : curPays;
-                base.payments = this._unionPayments(prevFiltered, curFiltered);
-                base.prepaidAmount = base.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-                map.set(c.id, base);
-            }
-            return Array.from(map.values());
-        },
-
-        mergeSnapshots(local, remote) {
-            const byDate = {};
-            for (const s of [...(remote || []), ...(local || [])]) {
-                if (!s || !s.date) continue;
-                const prev = byDate[s.date];
-                if (!prev) { byDate[s.date] = s; continue; }
-                // Prefer record with more fields / later source
-                byDate[s.date] = { ...prev, ...s };
-            }
-            return Object.keys(byDate).sort().map(d => byDate[d]);
-        },
-
-        buildPayload() {
-            return {
-                version: 1,
-                script: 'TCM-ALPHA',
-                scriptVersion: TCM.VERSION,
-                updated: Date.now(),
-                trained_log: Storage.getTrainedLog(),
-                train_sales: Storage.getTrainSales(),
-                paid_contracts: Storage.getPaidContracts(),
-                rotation: Storage.getRotation(),
-                snapshots: Storage.getSnapshots(),
-                schedule_config: (typeof Storage.getScheduleConfig === 'function' ? Storage.getScheduleConfig() : Storage.get('schedule_config', null)),
-                schedule_overrides: (typeof Storage.getScheduleOverrides === 'function' ? Storage.getScheduleOverrides() : Storage.get('schedule_overrides', null)),
-                google_sync_cfg: Storage.get('google_sync_cfg', null),
-                discord_cfg: Storage.get('discord_cfg', null),
-                overrides: (typeof Storage.getOverrides === 'function' ? Storage.getOverrides() : Storage.get('overrides', {})),
-                settings: (() => {
-                    // Full settings sync — strip secrets only
-                    const s = Storage.getSettings() || {};
-                    const out = JSON.parse(JSON.stringify(s));
-                    const SECRET_KEYS = new Set([
-                        'apiKey', 'api_key', 'companyKey', 'company_key',
-                        'password', 'token', 'secret', 'masterKey', 'master_key'
-                    ]);
-                    for (const k of Object.keys(out)) {
-                        if (SECRET_KEYS.has(k)) {
-                            delete out[k];
-                            continue;
-                        }
-                        // Drop long secret-like string fields
-                        if (/key|secret|token|password/i.test(k) && typeof out[k] === 'string' && out[k].length > 20) {
-                            delete out[k];
-                        }
-                    }
-                    return out;
-                })()
-            };
-        },
-
-        applyRemote(body) {
-            if (!body || typeof body !== 'object') return { applied: false };
-
-            if (body.trained_log && typeof body.trained_log === 'object') {
-                const merged = this.mergeTrainedLogs(Storage.getTrainedLog(), body.trained_log);
-                Storage.set('trained_log', merged);
-            }
-            if (Array.isArray(body.train_sales)) {
-                Storage.saveTrainSales(this.mergeTrainSales(Storage.getTrainSales(), body.train_sales));
-            }
-            if (Array.isArray(body.paid_contracts)) {
-                const local = Storage.getPaidContracts();
-                const map = new Map();
-                for (const c of [...body.paid_contracts, ...local]) {
-                    const key = c.id || (c.paidAt + '|' + (c.totalEarned || 0) + '|' + (c.buyerEmpId || ''));
-                    if (!map.has(key)) map.set(key, c);
-                }
-                Storage.set('paid_contracts', Array.from(map.values()));
-            }
-            if (body.rotation && typeof body.rotation === 'object') {
-                const local = Storage.getRotation();
-                // Prefer remote queue if remote updated more recently via payload.updated — still merge conservatively
-                const mergedRot = {
-                    ...local,
-                    ...body.rotation,
-                    excluded: Array.from(new Set([...(local.excluded || []), ...(body.rotation.excluded || [])])),
-                    joinDates: { ...(body.rotation.joinDates || {}), ...(local.joinDates || {}) },
-                    resetDates: { ...(body.rotation.resetDates || {}), ...(local.resetDates || {}) }
-                };
-                Storage.saveRotation(mergedRot);
-            }
-            if (Array.isArray(body.snapshots)) {
-                const merged = this.mergeSnapshots(Storage.getSnapshots(), body.snapshots);
-                Storage.set('snapshots', merged);
-                try { localStorage.setItem('TCM_snapshots_mirror', JSON.stringify(merged)); } catch (_e) {}
-            }
-            if (body.schedule_config && typeof body.schedule_config === 'object') {
-                if (typeof Storage.saveScheduleConfig === 'function') Storage.saveScheduleConfig(body.schedule_config);
-                else Storage.set('schedule_config', body.schedule_config);
-            }
-            if (body.schedule_overrides && typeof body.schedule_overrides === 'object') {
-                if (typeof Storage.saveScheduleOverrides === 'function') Storage.saveScheduleOverrides(body.schedule_overrides);
-                else Storage.set('schedule_overrides', body.schedule_overrides);
-            }
-            if (body.discord_cfg && typeof body.discord_cfg === 'object') {
-                const dLocal = Storage.get('discord_cfg', {}) || {};
-                // merge but never clobber local webhooks with empty remote strings lightly
-                Storage.set('discord_cfg', { ...dLocal, ...body.discord_cfg, opts: { ...(dLocal.opts||{}), ...((body.discord_cfg.opts)||{}) }, meta: { ...(dLocal.meta||{}), ...((body.discord_cfg.meta)||{}) } });
-            }
-            if (body.google_sync_cfg && typeof body.google_sync_cfg === 'object') {
-                const gLocal = Storage.get('google_sync_cfg', {}) || {};
-                Storage.set('google_sync_cfg', { ...gLocal, ...body.google_sync_cfg });
-            }
-            if (body.overrides && typeof body.overrides === 'object') {
-                const oLocal = (typeof Storage.getOverrides === 'function' ? Storage.getOverrides() : Storage.get('overrides', {})) || {};
-                Storage.set('overrides', { ...oLocal, ...body.overrides });
-            }
-            if (body.settings && typeof body.settings === 'object') {
-                const s = Storage.getSettings() || {};
-                const remote = body.settings;
-                const SECRET_KEYS = new Set([
-                    'apiKey', 'api_key', 'companyKey', 'company_key',
-                    'password', 'token', 'secret', 'masterKey', 'master_key'
-                ]);
-                function deepMerge(target, source) {
-                    if (!source || typeof source !== 'object' || Array.isArray(source)) return source;
-                    const out = (target && typeof target === 'object' && !Array.isArray(target)) ? { ...target } : {};
-                    for (const [k, v] of Object.entries(source)) {
-                        if (SECRET_KEYS.has(k)) continue;
-                        if (v && typeof v === 'object' && !Array.isArray(v)) {
-                            out[k] = deepMerge(out[k], v);
-                        } else if (v !== undefined) {
-                            out[k] = v;
-                        }
-                    }
-                    return out;
-                }
-                Storage.saveSettings(deepMerge(s, remote));
-            }
-            return { applied: true };
-        },
-
-        async pull() {
-            const cfg = this.getCfg();
-            if (!cfg.binId || !cfg.masterKey) throw new Error('JSONBin Bin ID and Master Key required');
-            const url = 'https://api.jsonbin.io/v3/b/' + encodeURIComponent(cfg.binId) + '/latest';
-            const res = await this._xhr('GET', url, this._headers(cfg.masterKey));
-            const body = res.data && res.data.record != null ? res.data.record : res.data;
-            return body;
-        },
-
-        async push(payload) {
-            const cfg = this.getCfg();
-            if (!cfg.binId || !cfg.masterKey) throw new Error('JSONBin Bin ID and Master Key required');
-            const url = 'https://api.jsonbin.io/v3/b/' + encodeURIComponent(cfg.binId);
-            const headers = {
-                'Content-Type': 'application/json',
-                'X-Master-Key': cfg.masterKey,
-                'X-Bin-Versioning': 'false'
-            };
-            await this._xhr('PUT', url, headers, payload || this.buildPayload());
-        },
-
-        async syncBothWays() {
-            const cfg = this.getCfg();
-            if (!cfg.binId || !cfg.masterKey) throw new Error('JSONBin not configured');
-            let remote = null;
-            try {
-                remote = await this.pull();
-            } catch (e) {
-                // Empty / new bin may 404 — still push local
-                if (!(e && (e.status === 404 || e.status === 422))) throw e;
-            }
-            if (remote) this.applyRemote(remote);
-            const payload = this.buildPayload();
-            await this.push(payload);
-            const cfg2 = this.getCfg();
-            cfg2.lastSync = new Date().toISOString();
-            cfg2.lastSyncOk = true;
-            cfg2.lastError = null;
-            this.saveCfg(cfg2);
-            return payload;
         }
     };
 
@@ -3528,8 +3179,7 @@ function runCapture() {
                 remoteUpdatedAt: '',
                 lastSync: null,
                 lastSyncOk: null,
-                lastError: null,
-                jsonbinMigrated: false
+                lastError: null
             });
         },
         saveCfg(c) { Storage.set('gist_sync_cfg', c); },
@@ -3577,9 +3227,7 @@ function runCapture() {
                 if (document.visibilityState === 'visible') this.onForeground('visible');
             });
             this._retryTimer = setInterval(() => this._drainQueue(), 20000);
-            this.maybeMigrateJsonBin()
-                .catch(e => console.warn('[TCM] gist migrate', e))
-                .then(() => this.onForeground('startup'));
+            this.onForeground('startup');
         },
         onForeground(reason) {
             if (!this.ready()) return;
@@ -3630,27 +3278,6 @@ function runCapture() {
             this._shadow = this._clone(this._collect());
             return cfg.gistId;
         },
-        async maybeMigrateJsonBin() {
-            const cfg = this.getCfg();
-            if (!cfg.token || !cfg.gistId || cfg.jsonbinMigrated) return;
-            const jb = JsonBinSync.getCfg();
-            if (!jb.binId || !jb.masterKey) {
-                cfg.jsonbinMigrated = true;
-                this.saveCfg(cfg);
-                return;
-            }
-            const remote = await JsonBinSync.pull();
-            this._applying = true;
-            try { JsonBinSync.applyRemote(remote); }
-            finally { this._applying = false; }
-            this._shadow = this._clone(this._collect());
-            this._stampAllNow();
-            cfg.jsonbinMigrated = true;
-            this.saveCfg(cfg);
-            jb.enabled = false;
-            JsonBinSync.saveCfg(jb);
-            await this.syncNow('jsonbin-migrate');
-        },
         listSnapshots() {
             return Storage.get('gist_local_snapshots', []) || [];
         },
@@ -3676,7 +3303,7 @@ function runCapture() {
                 '<button type="button" class="tcm-btn tcm-gist-restore" data-idx="' + i + '">Restore</button></div>'
             ).join('') : '<div style="color:#666;">No local snapshots yet.</div>';
             return '<div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">' +
-                'Primary sync is a <strong>private GitHub Gist</strong> (<code>tcm-data.json</code>). ' +
+                'Sync uses a <strong>private GitHub Gist</strong> (<code>tcm-data.json</code>). ' +
                 'Create a token with <strong>gist scope only</strong> (classic) or a fine-grained token with ' +
                 '<strong>Gists: Read and write</strong>. The token stays on this device and is never uploaded. ' +
                 'API keys are not synced.</div>' +
@@ -3724,7 +3351,6 @@ function runCapture() {
                     const field = tcmById('tcm-gist-id');
                     if (field) field.value = id;
                     if (btn) btn.textContent = '✓ Created';
-                    this.maybeMigrateJsonBin().catch(e => console.warn('[TCM] gist migrate', e));
                     rerender();
                 } catch (e) {
                     this._rememberError(e);
@@ -4589,36 +4215,173 @@ getMyTornId() {
 
             return this.call(`${TCM.API_BASE}/user/?key=${key}`);
         },
-getUserTrainingLog(daysBack, maxPages) {
+        /**
+         * Torn code 16: key access level is too low for this selection.
+         * user/log requires a full-access key, or a custom key that includes user → log.
+         */
+        isLogAccessError(err) {
+            const code = Number(err && err.code);
+            if (code === 16) return true;
+            const msg = String((err && (err.msg || err.message)) || '');
+            return /access level (of this key )?is not high enough|access level too low|does not have permission to access/i.test(msg);
+        },
+
+        /**
+         * One-time (per install, then once per page if it hasn't succeeded) lookup of
+         * log type 6263's title from the public /v2/torn/logtypes selection.
+         */
+        ensureTrainingLogType() {
+            const cached = Storage.get('logtype_6263', null);
+            if (cached && cached.title) return Promise.resolve(cached.title);
+            if (this._logTypeAttempted) return Promise.resolve((cached && cached.title) || '');
+            const key = Storage.getApiKey();
+            if (!key) return Promise.resolve('');
+            this._logTypeAttempted = true;
+            if (this._logTypeFlight) return this._logTypeFlight;
+            this._logTypeFlight = this.call(`${TCM.API_BASE}/v2/torn/logtypes?key=${encodeURIComponent(key)}`)
+                .then(data => {
+                    const raw = data && data.logtypes;
+                    const arr = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? Object.values(raw) : []);
+                    let title = '';
+                    for (let i = 0; i < arr.length; i++) {
+                        const row = arr[i];
+                        if (!row) continue;
+                        const id = Number(row.id != null ? row.id : row.log);
+                        if (id === 6263) { title = String(row.title || row.name || ''); break; }
+                    }
+                    if (title) Storage.set('logtype_6263', { id: 6263, title, checkedAt: Date.now() });
+                    const el = tcmById('tcm-logtype-6263');
+                    if (el) el.textContent = title || 'not listed';
+                    return title;
+                })
+                .catch(e => {
+                    console.warn('[TCM] logtypes lookup failed:', (e && (e.msg || e.message)) || e);
+                    this._logTypeAttempted = false;
+                    const el = tcmById('tcm-logtype-6263');
+                    if (el) el.textContent = 'lookup failed';
+                    return '';
+                })
+                .finally(() => { this._logTypeFlight = null; });
+            return this._logTypeFlight;
+        },
+
+        /**
+         * Fetch training log 6263.
+         * Pass a number of days (legacy) or { fromTs, maxPages }.
+         * `from` is exclusive (Torn: "after this time"). Pages follow
+         * _metadata.links.next and _metadata.nanostamp so rows that share a
+         * second are not dropped when the page fills up.
+         */
+        getUserTrainingLog(arg, maxPagesArg) {
             const key = Storage.getApiKey();
             if (!key) return Promise.reject({ code: 0, msg: 'No API key set.' });
 
-            const _fromTs    = Math.floor((Date.now() - (daysBack || 84) * 86400000) / 1000);
-            const _maxPages  = maxPages || 100;
-            const _PAGE_SIZE = 100;
-            const _allLog    = {};
-            const _self      = this;
+            let fromTs = null;
+            let daysBack = 84;
+            let maxPages = 100;
+            if (typeof arg === 'number') {
+                daysBack = arg > 0 ? arg : 84;
+                if (maxPagesArg) maxPages = maxPagesArg;
+            } else if (arg && typeof arg === 'object') {
+                if (arg.fromTs != null && isFinite(Number(arg.fromTs))) fromTs = Math.floor(Number(arg.fromTs));
+                if (arg.daysBack) daysBack = arg.daysBack;
+                if (arg.maxPages) maxPages = arg.maxPages;
+            }
+            const nowSec = Math.floor(Date.now() / 1000);
+            if (fromTs == null) fromTs = nowSec - Math.floor((daysBack || 84) * 86400);
+            if (!isFinite(fromTs) || fromTs < 0) fromTs = 0;
+            if (fromTs > nowSec) fromTs = nowSec;
 
-            function _fetchPage(toTs, pageNum, resolve, reject) {
-                const url = `${TCM.API_BASE}/v2/user/log?log=6263&limit=${_PAGE_SIZE}&from=${_fromTs}&to=${toTs}&key=${key}`;
-                _self._request(url, (data) => {
-                    const raw = data?.log;
-                    const entries = raw ? (Array.isArray(raw) ? raw : Object.values(raw)) : [];
-                    let oldestTs = null;
-                    entries.forEach(e => {
-                        const eid = e.id || `${e.timestamp}_${JSON.stringify(e.data || {})}`;
-                        _allLog[eid] = e;
-                        if (e.timestamp && (oldestTs === null || e.timestamp < oldestTs)) oldestTs = e.timestamp;
-                    });
-                    const exhausted = entries.length < _PAGE_SIZE || oldestTs === null || oldestTs <= _fromTs || pageNum >= _maxPages;
-                    if (exhausted) { resolve({ log: _allLog }); return; }
-                    setTimeout(() => _fetchPage(oldestTs - 1, pageNum + 1, resolve, reject), 1000);
-                }, reject);
+            const PAGE_SIZE = 100;
+            const allLog = {};
+            const self = this;
+
+            function listEntries(data) {
+                const raw = data && data.log;
+                if (!raw) return [];
+                return Array.isArray(raw) ? raw : Object.values(raw);
             }
 
-            return new Promise((resolve, reject) => {
-                _fetchPage(Math.floor(Date.now() / 1000), 1, resolve, reject);
-            });
+            function parseNext(data) {
+                const meta = (data && data._metadata) || {};
+                const metaNano = meta.nanostamp != null && String(meta.nanostamp) !== '' ? String(meta.nanostamp) : '';
+                const out = { link: false, to: null, nanostamp: '', metaNano: metaNano };
+                const next = meta.links && meta.links.next;
+                if (typeof next === 'string' && next) {
+                    try {
+                        const u = new URL(next, 'https://api.torn.com');
+                        if (!/\/user\/log\/?$/.test(u.pathname || '')) return out;
+                        const logParam = u.searchParams.get('log') || '';
+                        if (logParam && logParam.split(',').indexOf('6263') === -1) return out;
+                        const toRaw = u.searchParams.get('to');
+                        const linkNano = u.searchParams.get('nanostamp');
+                        out.link = true;
+                        out.to = toRaw != null && toRaw !== '' && isFinite(Number(toRaw)) ? Math.floor(Number(toRaw)) : null;
+                        out.nanostamp = linkNano ? String(linkNano) : '';
+                    } catch (e) { /* metadata nanostamp still applies */ }
+                }
+                return out;
+            }
+
+            function continuation(data, entries, oldest, oldestCount, toTs, nanostamp) {
+                const hint = parseNext(data);
+                if (hint.link) {
+                    const nextTo = hint.to != null ? hint.to : toTs;
+                    const nextNano = hint.nanostamp || '';
+                    if (nextTo !== toTs || nextNano !== (nanostamp || '')) {
+                        return { to: nextTo, nanostamp: nextNano };
+                    }
+                }
+                if (hint.metaNano && hint.metaNano !== (nanostamp || '')) {
+                    return { to: oldest, nanostamp: hint.metaNano };
+                }
+                if (oldest == null || oldest <= fromTs) return null;
+                // Page boundary landed inside a second. Re-read that second
+                // before stepping past it so the rows that didn't fit are kept.
+                if (oldestCount > 0 && oldestCount < entries.length && toTs !== oldest) {
+                    return { to: oldest, nanostamp: '' };
+                }
+                return { to: oldest - 1, nanostamp: '' };
+            }
+
+            function fetchPage(toTs, nanostamp, pageNum, seen) {
+                return new Promise((resolve, reject) => {
+                    const params = [
+                        'log=6263',
+                        'limit=' + PAGE_SIZE,
+                        'from=' + fromTs,
+                        'to=' + toTs,
+                        'key=' + encodeURIComponent(key)
+                    ];
+                    if (nanostamp) params.push('nanostamp=' + encodeURIComponent(nanostamp));
+                    const url = `${TCM.API_BASE}/v2/user/log?` + params.join('&');
+                    self._request(url, (data) => {
+                        const entries = listEntries(data);
+                        let oldest = null;
+                        let oldestCount = 0;
+                        entries.forEach(e => {
+                            const eid = e.id || `${e.timestamp}_${JSON.stringify(e.data || {})}`;
+                            allLog[String(eid)] = e;
+                            const ts = Number(e.timestamp);
+                            if (!ts) return;
+                            if (oldest === null || ts < oldest) { oldest = ts; oldestCount = 1; }
+                            else if (ts === oldest) oldestCount++;
+                        });
+                        const cursor = `${toTs}|${nanostamp || ''}|${entries.length}|${oldest == null ? '' : oldest}`;
+                        if (seen.has(cursor)) { resolve({ log: allLog }); return; }
+                        seen.add(cursor);
+                        const full = entries.length >= PAGE_SIZE;
+                        if (!full || pageNum >= maxPages) { resolve({ log: allLog }); return; }
+                        const next = continuation(data, entries, oldest, oldestCount, toTs, nanostamp);
+                        if (!next || next.to == null || next.to <= fromTs) { resolve({ log: allLog }); return; }
+                        setTimeout(() => {
+                            fetchPage(next.to, next.nanostamp || '', pageNum + 1, seen).then(resolve, reject);
+                        }, 1000);
+                    }, reject);
+                });
+            }
+
+            return fetchPage(nowSec, '', 1, new Set());
         },
 
 
@@ -7038,6 +6801,7 @@ App._pendingLoad = false;
                 return;
             }
             const _ubUpdate = (this._updateBannerHTML ? this._updateBannerHTML() : '');
+            const _ubLog = (this._logAccessBannerHTML ? this._logAccessBannerHTML() : '');
             const _ubLimited = (this.state?.limitedMode) ? (
                 `<div class="tcm-notice" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:10px;line-height:1.55;">
 <strong style="color:#f59e0b;">Limited view</strong>
@@ -7051,7 +6815,7 @@ Director-only tools are hidden. Paste a director key in Settings for the full da
 </span>
 </div>`
             ) : '';
-            const _ub = _ubUpdate + _ubLimited;
+            const _ub = _ubUpdate + _ubLog + _ubLimited;
             switch (tab) {
                 case 'overview':
                     body.innerHTML = _ub + this._tabOverview(this.state);
@@ -7844,7 +7608,9 @@ case 'proxy_keys':
             const _tabsEl = tcmById('tcm-tabs');
             if (_tabsEl) _tabsEl.style.display = '';
             if (this.launcher) { this.launcher.classList.remove('err', 'loading'); }
-this._setStatus(`Last updated ${new Date().toLocaleTimeString()}`, 'ok');
+            const _logBlocked = Storage.get('log_access_warn', null);
+            const _statusBase = `Last updated ${new Date().toLocaleTimeString()}`;
+            this._setStatus(_logBlocked && _logBlocked.msg ? `${_statusBase} · training log blocked` : _statusBase, 'ok');
             this._applyTheme();
 
 
@@ -7932,6 +7698,22 @@ const _catForTab = { overview:'management', finance:'management', stock:'managem
             }
         },
 
+        _logAccessBannerHTML() {
+            const w = Storage.get('log_access_warn', null);
+            if (!w || !w.msg) return '';
+            const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const lt = Storage.get('logtype_6263', null);
+            const title = lt && lt.title ? ` (${esc(lt.title)})` : '';
+            const code = w.code != null ? esc(w.code) : '16';
+            return `<div class="tcm-warn-box" id="tcm-log-access-warn" style="margin-bottom:10px;line-height:1.55;">
+⚠ <strong>Training log is blocked.</strong>
+Torn refused <code>/v2/user/log?log=6263</code>${title}
+with error ${code}: ${esc(w.msg)}.
+This key needs <strong>Full Access</strong>, or a custom key that includes <strong>user → log</strong> so training log 6263 is allowed.
+Company data is still shown. Update the key in Settings.
+</div>`;
+        },
+
         _updateBannerHTML() {
     const v = UI._updateVersion || _tcmGmGet('TCM_update_pending_v', '');
     const _bvCmp = vv => (vv||'0').split('.').map(Number).reduce((a,b,i)=>a+b*Math.pow(1000,2-i),0);
@@ -7948,7 +7730,7 @@ display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
 New version <strong style="color:#fff;">v${v}</strong> is out
 (you have v${TCM.VERSION}).
 </span>
-<a href="https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Beta" target="_blank"
+<a href="https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Alpha" target="_blank"
 style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.5);
 color:#f59e0b;border-radius:4px;padding:5px 10px;font-weight:700;font-size:12px;
 text-decoration:none;white-space:nowrap;">
@@ -15661,10 +15443,15 @@ const _done = (_pLog[c.buyerEmpId] || []).filter(e => {
     if (_subTabs) _subTabs.innerHTML = '';
     const _tabsBar = tcmById('tcm-tabs');
     if (_tabsBar) _tabsBar.style.display = 'none';
-    const body = tcmById('tcm-body');
+            const body = tcmById('tcm-body');
     const s = Storage.getSettings();
             const stocks = s.stocks || {};
+            const _ltCached = Storage.get('logtype_6263', null);
+            const _ltTitle = (_ltCached && _ltCached.title)
+                ? String(_ltCached.title).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                : 'checking…';
             body.innerHTML = `
+                ${this._logAccessBannerHTML()}
                 <div class="tcm-section-label">API Key</div>
                 <div class="tcm-notice" style="line-height:1.6;">
                     A <strong>custom key</strong> is recommended — no full access needed.<br>
@@ -15814,6 +15601,11 @@ color:#ddd;padding:4px 6px;font-size:12px;text-align:center;font-family:'JetBrai
     <span class="lbl">Rotation start date</span>
     <span class="val">${Storage.getRotation().startDate || '—'}</span>
 </div>
+<div class="tcm-row">
+    <span class="lbl">Torn log 6263</span>
+    <span class="val" id="tcm-logtype-6263">${_ltTitle}</span>
+</div>
+<div style="font-size:10px;color:#6b7280;margin:-2px 0 8px;">Title from <code>/v2/torn/logtypes</code>, checked once and cached.</div>
 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;margin-bottom:8px;">
     <button class="tcm-btn green" id="tcm-export-rotation">↓ Export Rotation Data</button>
     <label class="tcm-btn" style="cursor:pointer;" id="tcm-import-rotation-label">
@@ -15828,42 +15620,6 @@ color:#ddd;padding:4px 6px;font-size:12px;text-align:center;font-family:'JetBrai
                 <div class="tcm-section-label">GitHub Gist Sync</div>
 ${GistSync.settingsHTML()}
 <hr class="tcm-divider">
-<div class="tcm-section-label">JSONBin (optional fallback)</div>
-                <div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">
-                    Optional fallback, off unless you enable it below. Gist is the primary sync. Still covers <strong>settings</strong>, <strong>train logs</strong>, <strong>contracts</strong>,
-                    <strong>rotation</strong>, and <strong>finance snapshots</strong> across browsers / Torn PDA.<br>
-                    Create a free bin at <a href="https://jsonbin.io" target="_blank" rel="noopener" style="color:#7eb8ff;">jsonbin.io</a>
-                    (paste the Bin ID + Master Key below). API keys and secrets are <strong>never</strong> uploaded.
-                </div>
-                ${(() => {
-                    const _jb = JsonBinSync.getCfg();
-                    const _ls = _jb.lastSync ? new Date(_jb.lastSync).toLocaleString() : 'never';
-                    return `
-<label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">JSONBin Bin ID</label>
-<input class="tcm-input" id="tcm-jsonbin-id" type="text" placeholder="e.g. 65f0a1b2c3d4..."
-value="${(_jb.binId || '').replace(/"/g, '&quot;')}"
-style="width:100%;box-sizing:border-box;margin-bottom:8px;" />
-<label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">JSONBin Master Key</label>
-<input class="tcm-input" id="tcm-jsonbin-key" type="password" placeholder="X-Master-Key"
-value="${(_jb.masterKey || '').replace(/"/g, '&quot;')}"
-style="width:100%;box-sizing:border-box;margin-bottom:8px;" />
-<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#ddd;margin-bottom:10px;">
-<input type="checkbox" id="tcm-jsonbin-enabled" ${_jb.enabled ? 'checked' : ''}
-style="accent-color:#7eb8ff;width:14px;height:14px;" />
-Auto-sync on refresh (when configured)
-</label>
-<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-<button class="tcm-btn green" id="tcm-jsonbin-save">Save</button>
-<button class="tcm-btn" id="tcm-jsonbin-now">⇄ Sync Now</button>
-<button class="tcm-btn" id="tcm-jsonbin-pull">↓ Pull only</button>
-<button class="tcm-btn" id="tcm-jsonbin-push">↑ Push only</button>
-</div>
-<div style="font-size:11px;color:#888;margin-bottom:4px;">Last sync:
-<span style="color:${_jb.lastSyncOk ? '#7eb8ff' : (_jb.lastSync ? '#fc6' : '#888')};">${_ls}${_jb.lastSync ? (_jb.lastSyncOk ? ' ✓' : ' ⚠ failed') : ''}</span>
-${_jb.lastError ? `<span style="color:#f88;"> — ${_jb.lastError.replace(/</g,'&lt;').slice(0,120)}</span>` : ''}
-</div>`;
-                })()}
-                <hr class="tcm-divider">
                 <div class="tcm-section-label">Google Sheets Auto-Sync</div>
 
                 ${(() => {
@@ -16300,80 +16056,7 @@ tcmById('tcm-gsync-copy-btn')?.addEventListener('click', function() {
             });
 
             GistSync.bindSettings(this);
-            tcmById('tcm-jsonbin-save')?.addEventListener('click', () => {
-                const cfg = JsonBinSync.getCfg();
-                cfg.binId = (tcmById('tcm-jsonbin-id')?.value || '').trim();
-                cfg.masterKey = (tcmById('tcm-jsonbin-key')?.value || '').trim();
-                cfg.enabled = !!tcmById('tcm-jsonbin-enabled')?.checked;
-                JsonBinSync.saveCfg(cfg);
-                const btn = tcmById('tcm-jsonbin-save');
-                if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { btn.textContent = 'Save'; }, 1500); }
-            });
-            tcmById('tcm-jsonbin-now')?.addEventListener('click', async () => {
-                const btn = tcmById('tcm-jsonbin-now');
-                if (btn) { btn.textContent = '…syncing'; btn.disabled = true; }
-                try {
-                    // Persist fields first
-                    const cfg = JsonBinSync.getCfg();
-                    cfg.binId = (tcmById('tcm-jsonbin-id')?.value || '').trim();
-                    cfg.masterKey = (tcmById('tcm-jsonbin-key')?.value || '').trim();
-                    cfg.enabled = !!tcmById('tcm-jsonbin-enabled')?.checked;
-                    JsonBinSync.saveCfg(cfg);
-                    await JsonBinSync.syncBothWays();
-                    if (btn) { btn.textContent = '✓ Synced'; }
-                    setTimeout(() => this._renderSettings(), 900);
-                } catch (e) {
-                    const cfg = JsonBinSync.getCfg();
-                    cfg.lastSync = new Date().toISOString();
-                    cfg.lastSyncOk = false;
-                    cfg.lastError = e.message || String(e);
-                    JsonBinSync.saveCfg(cfg);
-                    if (btn) { btn.textContent = '✗ Failed'; btn.disabled = false; }
-                    alert('JSONBin sync failed: ' + (e.message || e));
-                    setTimeout(() => this._renderSettings(), 1200);
-                }
-            });
-            tcmById('tcm-jsonbin-pull')?.addEventListener('click', async () => {
-                const btn = tcmById('tcm-jsonbin-pull');
-                if (btn) { btn.textContent = '…pulling'; btn.disabled = true; }
-                try {
-                    const cfg = JsonBinSync.getCfg();
-                    cfg.binId = (tcmById('tcm-jsonbin-id')?.value || '').trim();
-                    cfg.masterKey = (tcmById('tcm-jsonbin-key')?.value || '').trim();
-                    JsonBinSync.saveCfg(cfg);
-                    const remote = await JsonBinSync.pull();
-                    JsonBinSync.applyRemote(remote);
-                    cfg.lastSync = new Date().toISOString();
-                    cfg.lastSyncOk = true;
-                    cfg.lastError = null;
-                    JsonBinSync.saveCfg(cfg);
-                    if (btn) { btn.textContent = '✓ Pulled'; }
-                    setTimeout(() => this._renderSettings(), 900);
-                } catch (e) {
-                    if (btn) { btn.textContent = '✗ Failed'; btn.disabled = false; }
-                    alert('JSONBin pull failed: ' + (e.message || e));
-                }
-            });
-            tcmById('tcm-jsonbin-push')?.addEventListener('click', async () => {
-                const btn = tcmById('tcm-jsonbin-push');
-                if (btn) { btn.textContent = '…pushing'; btn.disabled = true; }
-                try {
-                    const cfg = JsonBinSync.getCfg();
-                    cfg.binId = (tcmById('tcm-jsonbin-id')?.value || '').trim();
-                    cfg.masterKey = (tcmById('tcm-jsonbin-key')?.value || '').trim();
-                    JsonBinSync.saveCfg(cfg);
-                    await JsonBinSync.push();
-                    cfg.lastSync = new Date().toISOString();
-                    cfg.lastSyncOk = true;
-                    cfg.lastError = null;
-                    JsonBinSync.saveCfg(cfg);
-                    if (btn) { btn.textContent = '✓ Pushed'; }
-                    setTimeout(() => this._renderSettings(), 900);
-                } catch (e) {
-                    if (btn) { btn.textContent = '✗ Failed'; btn.disabled = false; }
-                    alert('JSONBin push failed: ' + (e.message || e));
-                }
-            });
+            if (typeof API.ensureTrainingLogType === 'function') API.ensureTrainingLogType().catch(() => {});
 
             tcmById('tcm-gsync-save')?.addEventListener('click', () => {
                 const cfg = GoogleSync.getCfg();
@@ -18922,13 +18605,22 @@ if (!Storage.getApiKey()) { UI.showSetup(); return; }
 try {
                 const myTornId = await this._ensureMyTornId();
 
-                const _lastLogSync  = Storage.getLastLogSyncTs();
-                const _syncDaysBack = _lastLogSync
-                    ? Math.min(84, Math.ceil((Date.now() - _lastLogSync) / 86400000) + 1)
-                    : 84;
+                // Incremental training log. `from` is exclusive, so overlap by 15 minutes.
+                // Full 84-day window only when there is no stored sync timestamp.
+                const LOG_FULL_WINDOW_SEC = 84 * 86400;
+                const LOG_OVERLAP_SEC = 15 * 60;
+                const _lastLogSync = Number(Storage.getLastLogSyncTs()) || 0;
+                const _nowSec = Math.floor(Date.now() / 1000);
+                let _logFromTs;
+                if (_lastLogSync > 0) {
+                    const _lastSec = _lastLogSync > 1e11 ? Math.floor(_lastLogSync / 1000) : Math.floor(_lastLogSync);
+                    _logFromTs = Math.max(0, _lastSec - LOG_OVERLAP_SEC);
+                } else {
+                    _logFromTs = _nowSec - LOG_FULL_WINDOW_SEC;
+                }
                 const [data, logResult] = await Promise.allSettled([
                     API.getCompanyData(),
-                    API.getUserTrainingLog(_syncDaysBack)
+                    API.getUserTrainingLog({ fromTs: _logFromTs })
                 ]);
 
 if (data.status === 'rejected') {
@@ -18972,7 +18664,9 @@ if (data.status === 'rejected') {
 
                 const _currentCompId = String(profile?.ID || profile?.id || '');
                 const _lastCompId    = Storage.getLastCompanyId();
+                let _logCompanyChanged = false;
                 if (_currentCompId && _lastCompId && _lastCompId !== _currentCompId) {
+                _logCompanyChanged = true;
     console.log(`[TCM] Company changed: ${_lastCompId} → ${_currentCompId} — clearing all company-specific data`);
 Storage.set('trained_log', {});
     Storage.saveProcessedLogIds([]);
@@ -19004,10 +18698,22 @@ Storage.rememberEmployeeNames(empNameMap);
                 let logImported = 0;
                 if (logResult.status === 'fulfilled') {
                     logImported = Storage.importUserTrainingLog(logResult.value, empIds, empNameMap, _currentCompId);
-                    Storage.setLastLogSyncTs(Date.now());
+                    Storage.set('log_access_warn', null);
+                    // The in-flight fetch used the previous cursor. Leave the timestamp
+                    // empty so the next refresh loads the full 84-day window.
+                    if (_logCompanyChanged) Storage.set('last_log_sync_ts', 0);
+                    else Storage.setLastLogSyncTs(Date.now());
                     if (logImported > 0) console.log(`[TCM] Imported ${logImported} new training events from user log`);
                 } else {
-                    console.warn('[TCM] user/log import failed (non-fatal):', logResult.reason?.msg || logResult.reason);
+                    const _logReason = logResult.reason || {};
+                    console.warn('[TCM] user/log import failed (non-fatal):', _logReason.msg || _logReason);
+                    if (API.isLogAccessError(_logReason)) {
+                        Storage.set('log_access_warn', {
+                            code: _logReason.code != null ? _logReason.code : 16,
+                            msg: _logReason.msg || _logReason.message || 'Access level too low for user log.',
+                            ts: Date.now()
+                        });
+                    }
                 }
                 console.log(`[TCM] Train import: news=${newsImported} new, user_log=${logImported} new, user_log_status=${logResult.status}`);
                 if (_tcmGmGet(TCM.NS + 'recalc_rot_start', '') === 'true') {
@@ -19207,17 +18913,6 @@ console.log('[TCM DEBUG] myTornId resolved to:', JSON.stringify(myTornId));
 
                 {
 
-                    {
-                        const _jbCfg = JsonBinSync.getCfg();
-                        if (_jbCfg.enabled && _jbCfg.binId && _jbCfg.masterKey) {
-                            const _jbLast = _jbCfg.lastSync ? new Date(_jbCfg.lastSync).getTime() : 0;
-                            if (Date.now() - _jbLast > 5 * 60 * 1000) {
-                                JsonBinSync.syncBothWays().catch(e => console.warn('[TCM] JSONBin auto-sync failed:', e));
-                            }
-                        }
-                    }
-
-
                 try { Discord.maybeAutoPost(state); } catch (_de) { console.warn('[TCM] Discord auto', _de); }
 
                     const _gsCfg = GoogleSync.getCfg();
@@ -19257,6 +18952,14 @@ async rebuildFullTrainingHistory() {
                 alert(`Full training history rebuilt — imported ${imported} entries from the last 2 years.`);
             } catch (e) {
                 console.error('[TCM] Full history rebuild failed:', e);
+                if (API.isLogAccessError(e)) {
+                    Storage.set('log_access_warn', {
+                        code: e.code != null ? e.code : 16,
+                        msg: e.msg || e.message || 'Access level too low for user log.',
+                        ts: Date.now()
+                    });
+                    if (UI.state && UI._currentTab) UI._renderTab(UI._currentTab);
+                }
                 alert('Failed to rebuild history: ' + (e?.msg || e?.message || String(e)));
             }
         },
@@ -19510,6 +19213,7 @@ Storage.saveRankingCache({ ts: Date.now(), typeInt, companies: _allCos, _v: 5 })
             UI.init();
             Storage.trimStorage();
             if (typeof Storage.migrateContractPayments === 'function') Storage.migrateContractPayments();
+            if (typeof Storage.migrateRemoveJsonBin === 'function') Storage.migrateRemoveJsonBin();
 
 
 const _licCachedMyId = (() => {
@@ -19575,6 +19279,9 @@ App._startCountdown();
             App._startProxyAutoRefresh();
 
             try { GistSync.start(); } catch (e) { console.warn('[TCM] gist start', e); }
+            setTimeout(() => {
+                if (typeof API.ensureTrainingLogType === 'function') API.ensureTrainingLogType().catch(() => {});
+            }, 2500);
 
             setTimeout(() => {
                 const cached = _tcmGmGet('TCM_update_available', '');
