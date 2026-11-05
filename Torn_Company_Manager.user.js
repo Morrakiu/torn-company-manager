@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM ALPHA
 // @namespace    TCM
-// @version      10.13.1-alpha
+// @version      10.13.1-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -25,8 +25,8 @@
 // @connect      script.googleusercontent.com
 // @run-at       document-idle
 // @license      MIT
-// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
-// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Alpha/Torn_Company_Manager.user.js
+// @downloadURL  https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
+// @updateURL    https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
 // ==/UserScript==
 
 (function () {
@@ -388,7 +388,7 @@
 
 
     const TCM = {
-        VERSION: '10.13.1-alpha',
+        VERSION: '10.13.1-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -7902,7 +7902,7 @@ display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
 New version <strong style="color:#fff;">v${v}</strong> is out
 (you have v${TCM.VERSION}).
 </span>
-<a href="https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Alpha" target="_blank"
+<a href="https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Beta" target="_blank"
 style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.5);
 color:#f59e0b;border-radius:4px;padding:5px 10px;font-weight:700;font-size:12px;
 text-decoration:none;white-space:nowrap;">
