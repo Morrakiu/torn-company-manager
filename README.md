@@ -2,7 +2,7 @@
 
 Tampermonkey and Torn PDA userscript for company directors on [Torn](https://www.torn.com).
 
-**Version:** 11.1.0-beta  
+**Version:** 11.1.1-beta  
 **Author:** Morrakiu  
 **Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) on branch `Morrakiu-TCM-Beta`
 
@@ -66,16 +66,13 @@ Create a GitHub token with only the gist scope (classic) or fine-grained Gists r
 
 On a training contract you can set a preferred stat: MAN, INT, or END. Leave it blank and that employee is never moved.
 
-On the company page, choose **Contracts**, then press **Start contract training**. Changing the mode does not train anyone. For each contract that still has trains allotted today, and only while the company still has trains:
+On the company page, choose **Contracts**. Changing the mode does not move or train anyone. The step button then names the single next action, for example **Move JT100 to Guard**, **Submit move for JT100**, **Train JT100 (1/2)**, or **Restore JT100 to Cleaner**. Each press does at most that one action. Finishing it only changes the label. It does not click Torn again. Presses while a click is still waiting are ignored and are not queued.
 
-1. If a stat is set, the position with the highest training gain for that stat is chosen. Requirements are not used. Equal gains stay on the employee's current position when that position is one of the ties; otherwise the name order decides.
-2. The current position dropdown value is saved before anything moves.
-3. The script moves, waits until Torn accepts the update, trains one allotment at a time, and counts a train only after Torn shows a confirmation that is not an error.
-4. It restores the saved position and waits for that update before the next contract.
+11.1.0 ran every remaining step by itself after one press. Do not use that build for company training. That build also looked the button up before the bar was on the page, so the press could do nothing and show no status. 11.1.1 binds the button on the bar and writes a reason next to it when a step cannot run.
 
-If no position has a numeric gain for the stat, the run stops and shows that. It does not guess. A failed move, train, or restore does not count and does not open the next contract while a position is still unrestored. Reload keeps that state until you press Resume. Cancel restores the current employee and stops.
+The position with the highest training gain for the preferred stat is chosen. Requirements are not used. Equal gains stay on the current position when it is one of the ties. The dropdown value is saved before a move. If the employee is already there, that press does not move them and does not train them. A contract with no stat is trained in place, still one train per press.
 
-The run is stored only on this device (`contract_stat_run`). The gist cannot lock a live training session. Do not press Start on two devices at once. The preferred stat itself syncs with the contract.
+A train counts only after Torn shows a confirmation that is not an error. If no position has a numeric gain, the status says so and nothing is moved. Cancel, a failed step, or a reload never moves or trains by itself. If someone is away from the saved position, the button offers the restore press. Do not run the steps on two devices at once. The preferred stat syncs with the contract. The in-progress step does not. Torn's published scripting rule says a non-API request must be directly and manually initiated by the user. This button is built so one press makes at most one such request. That is not a staff review, and it does not clear the rest of the script. Quick Train's restore and Stat Rotation still press Torn's Update from a timer after an earlier click.
 
 ## Tests
 
@@ -87,6 +84,7 @@ node tools/tcm-log-page-test.js
 node tools/tcm-boot-check.js
 node tools/tcm-sync-harness.js
 node tools/tcm-contract-stat-test.js
+node tools/tcm-contract-start-dom-test.js
 node tools/build-min-userscript.js
 ```
 
@@ -100,7 +98,7 @@ The sync harness is an in-memory two-device gist. It does not call GitHub and do
 4. Remove someone from rotation exclude, delete a contract payment, and confirm the other device does not put them back.
 5. During a company switch, Sync Now should say it is waiting, not upload an empty training log.
 6. Turn the device clock far ahead, edit on the other device after it has synced, and confirm the later edit still wins.
-7. Set JT100's contract to MAN. On the company page select Contracts, press Start, and confirm the move, the allotted trains, and the restore happen before the next employee. Pressing Contracts by itself must not move anyone. A contract with no stat must stay in place.
+7. Set a contract to MAN. On the company page select Contracts and read the step button. Each press should do only the labeled action: move, submit that move, one train, or restore. Spam and reload must not continue. 11.1.0 should be updated before using this, because that build tried to run the sequence by itself and its Start press could do nothing.
 
 ## License
 

@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         TCM
 // @namespace    TCM
-// @version      11.1.0-beta
+// @version      11.1.1-beta
 // @charset      utf-8
-// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
+// @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, training rotation, promotion projections, and recommendations. Company contract steps take one click per move, train, or restore.
 // @author       Morrakiu
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -388,7 +388,7 @@
 
 
     const TCM = {
-        VERSION: '11.1.0-beta',
+        VERSION: '11.1.1-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -15631,7 +15631,7 @@ Fully free (entire contract complimentary)
 <option value="int">INT</option>
 <option value="end">END</option>
 </select>
-<div style="font-size:11px;color:#4b5563;margin-top:3px;">Used only when you press Start contract training. Blank never moves this employee.</div>
+<div style="font-size:11px;color:#4b5563;margin-top:3px;">Blank never moves this employee. On the company page each button press does only the one step written on the button.</div>
 </div>
 </div>
 <div style="margin-bottom:10px;">
@@ -21262,25 +21262,32 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
             }
             return next;
         },
+        buttonLabel(run) {
+            if (!run || !run.active) return 'Next contract step';
+            const item = this.current(run);
+            if (!item) return 'Next contract step';
+            const name = item.empName || 'employee';
+            const step = ((item.trainsDone || 0) + 1) + '/' + (item.toTrain || 0);
+            if (!item.stat && (run.phase === 'capture' || run.phase === 'train')) return 'Train ' + name + ' (' + step + ')';
+            if (run.phase === 'capture' || run.phase === 'switch-set') return 'Move ' + name + ' to ' + (item.trainPosName || 'position');
+            if (run.phase === 'switch-confirm') return 'Submit move for ' + name;
+            if (run.phase === 'train') return 'Train ' + name + ' (' + step + ')';
+            if (run.phase === 'restore-set') return 'Restore ' + name + ' to ' + (item.origPosName || 'original');
+            if (run.phase === 'restore-confirm') return 'Submit restore for ' + name;
+            if (run.phase === 'blocked') return 'Stopped';
+            return 'Next contract step';
+        },
         statusText(run) {
             if (!run || !run.active) {
                 if (run && run.error) return run.error;
-                if (run && run.phase === 'done') return 'Contract training finished.';
-                return '';
+                if (run && run.phase === 'done') return 'Contract steps finished. Each step needed its own click.';
+                return 'Each click does one move, one train, or one restore. Changing TCM Mode does not act.';
             }
             const item = this.current(run);
-            if (!item) return 'Contract training finished.';
-            const stat = item.stat ? item.stat.toUpperCase() : 'current position';
-            const pos = item.trainPosName || 'current position';
-            const n = (item.trainsDone || 0) + '/' + (item.toTrain || 0);
-            if (run.phase === 'capture' || run.phase === 'switch-set' || run.phase === 'switch-confirm') {
-                return item.empName + ' ' + stat + ' → ' + pos + ' (' + n + '). Saving the original position, then moving.';
-            }
-            if (run.phase === 'train') return item.empName + ' ' + stat + ' in ' + pos + ' — trained ' + n + '.';
-            if (run.phase === 'restore-set' || run.phase === 'restore-confirm') {
-                return 'Restoring ' + item.empName + ' before the next contract.';
-            }
-            return item.empName + ' ' + n;
+            if (!item) return 'Contract steps finished.';
+            if (run.phase === 'blocked') return run.error || 'Stopped. Nothing else will be clicked.';
+            const label = this.buttonLabel(run);
+            return 'Next click: ' + label + '. One action only.';
         }
     };
 
@@ -21930,13 +21937,15 @@ _barInner.appendChild(_btnPri);
                 const _crRow = document.createElement('div');
                 _crRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;margin-top:6px;padding-top:6px;border-top:1px solid #2a2a2a;';
                 _crRow.innerHTML = '<span style="font-size:11px;color:#9ca3af;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">Contracts:</span>' +
-                    '<button id="tcm-cr-start" type="button" style="padding:3px 12px;border-radius:4px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.12);color:#f59e0b;font-size:11px;font-weight:700;cursor:pointer;font-family:Arial,sans-serif;">▶ Start contract training</button>' +
+                    '<button id="tcm-cr-start" type="button" style="padding:3px 12px;border-radius:4px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.12);color:#f59e0b;font-size:11px;font-weight:700;cursor:pointer;font-family:Arial,sans-serif;">Next contract step</button>' +
                     '<button id="tcm-cr-cancel" type="button" style="padding:3px 8px;border-radius:4px;border:1px solid #374151;background:transparent;color:#888;font-size:11px;cursor:pointer;font-family:Arial,sans-serif;display:none;">✕ Cancel</button>' +
                     '<span id="tcm-cr-status" style="font-size:11px;color:#888;"></span>' +
-                    '<span style="font-size:10px;color:#6b7280;">This device only. Do not start this on two devices at once. Changing TCM Mode does not train anyone.</span>';
+                    '<span style="font-size:10px;color:#6b7280;">One click, one action. Torn is not clicked again until you press the button. This device only.</span>';
                 _barInner.appendChild(_crRow);
-
                 bar.appendChild(_barInner);
+                const _crStartBtn = _barInner.querySelector('#tcm-cr-start');
+                const _crCancelBtn = _barInner.querySelector('#tcm-cr-cancel');
+                const _crStatusEl = _barInner.querySelector('#tcm-cr-status');
 
 
                 bar.querySelector('#tcm-sr-btn')?.addEventListener('click', () => {
@@ -22080,18 +22089,18 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     else Storage.set(ContractStatRun.KEY, run);
                 };
                 const _crStatus = (text, color) => {
-                    const el = tcmById('tcm-cr-status');
+                    const el = (_crStatusEl && _crStatusEl.isConnected) ? _crStatusEl : bar.querySelector('#tcm-cr-status');
                     if (!el) return;
                     el.textContent = text || '';
                     el.style.color = color || '#9ca3af';
                 };
                 const _crButtons = () => {
-                    const start = tcmById('tcm-cr-start');
-                    const cancel = tcmById('tcm-cr-cancel');
+                    const start = (_crStartBtn && _crStartBtn.isConnected) ? _crStartBtn : bar.querySelector('#tcm-cr-start');
+                    const cancel = (_crCancelBtn && _crCancelBtn.isConnected) ? _crCancelBtn : bar.querySelector('#tcm-cr-cancel');
                     const run = _crLoad();
                     if (start) {
                         start.disabled = !!_crBusy;
-                        start.textContent = (run && run.active) ? '▶ Resume contract training' : '▶ Start contract training';
+                        start.textContent = ContractStatRun.buttonLabel(run);
                     }
                     if (cancel) cancel.style.display = (run && run.active) ? '' : 'none';
                 };
@@ -22111,8 +22120,19 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     return (el && (el.innerText || el.textContent) || '').trim();
                 };
                 const _crIsErr = (text) => /error|fail|not enough|unable|cannot|can't|invalid|denied/i.test(text || '');
-                const _crClearMsg = () => { const el = document.getElementById('emp_message'); if (el) el.remove(); };
-                const _crLi = (id) => document.querySelector('li[data-user="' + id + '"]');
+                const _crClearMsg = () => { const el = document.getElementById('emp_message'); if (el) el.textContent = ''; };
+                const _crLi = (id) => {
+                    const sid = String(id);
+                    const direct = document.querySelector('li[data-user="' + sid + '"]')
+                        || document.querySelector('[data-user="' + sid + '"]');
+                    if (direct && direct.querySelector('select.employee-rank, select')) return direct;
+                    const links = document.querySelectorAll('a[href*="ID=' + sid + '"], a[href*="id=' + sid + '"]');
+                    for (let i = 0; i < links.length; i++) {
+                        const row = links[i].closest('[data-user], li, tr') || links[i].parentElement;
+                        if (row && row.querySelector('select.employee-rank, select')) return row;
+                    }
+                    return direct;
+                };
                 const _crRank = (id) => _crLi(id)?.querySelector('select.employee-rank');
                 const _crUpdateVis = (id) => {
                     const d = _crLi(id)?.querySelector('.update');
@@ -22165,12 +22185,16 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                         };
                     }
                     if (action.type === 'switch-set') {
-                        const rank = _crRank(item.empId);
+                        const row = _crLi(item.empId);
+                        const rank = row?.querySelector('select.employee-rank, select');
                         if (!rank || !item.origPosVal) return { type: 'fail', message: 'Original position was not saved for ' + item.empName + '.' };
                         const idx = _srFindOptIdx(rank, item.trainPosName);
                         if (idx === -1) return { type: 'fail', message: item.trainPosName + ' is not in the dropdown.' };
                         _tcmGmSet('TCM_ps_orig_' + item.empId, item.origPosVal);
-                        if (!_srSetDrop(item.empId, idx, true)) return { type: 'fail', message: 'Could not change the position dropdown.' };
+                        rank.selectedIndex = idx;
+                        rank.dispatchEvent(new Event('change', { bubbles: true }));
+                        const upd = row.querySelector('.update');
+                        if (upd) { upd.classList.remove('d-hidden', 't-hide'); upd.classList.add('t-show'); }
                         return { type: 'switch-set-ok' };
                     }
                     if (action.type === 'switch-confirm' || action.type === 'restore-confirm') {
@@ -22187,10 +22211,15 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                         return { type: action.type === 'switch-confirm' ? 'switch-confirm-ok' : 'restore-confirm-ok' };
                     }
                     if (action.type === 'restore-set') {
-                        const rank = _crRank(item.empId);
+                        const row = _crLi(item.empId);
+                        const rank = row?.querySelector('select.employee-rank, select');
                         if (!rank || !item.origPosVal) return { type: 'fail', message: 'Cannot restore ' + item.empName + '. The saved position is still stored.' };
                         if (String(rank.value) === String(item.origPosVal)) return { type: 'restore-confirm-ok' };
-                        if (!_srSetDrop(item.empId, item.origPosVal, false)) return { type: 'fail', message: 'Could not select the original position.' };
+                        rank.value = String(item.origPosVal);
+                        if (String(rank.value) !== String(item.origPosVal)) return { type: 'fail', message: 'Could not select the original position.' };
+                        rank.dispatchEvent(new Event('change', { bubbles: true }));
+                        const upd = row.querySelector('.update');
+                        if (upd) { upd.classList.remove('d-hidden', 't-hide'); upd.classList.add('t-show'); }
                         return { type: 'restore-set-ok' };
                     }
                     if (action.type === 'train') {
@@ -22211,72 +22240,152 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     }
                     return { type: 'fail', message: 'Unknown contract step.' };
                 };
-                async function _crLoop() {
-                    if (_crBusy) return;
+                const _crMutating = { 'switch-set': 1, 'switch-confirm': 1, 'train': 1, 'restore-set': 1, 'restore-confirm': 1 };
+                // Passive bookkeeping only. Stops before a dropdown change, Update click, or train click.
+                const _crSettle = (run) => {
+                    let guard = 0;
+                    while (run && run.active && guard++ < 12) {
+                        const action = ContractStatRun.action(run);
+                        if (action.type === 'advance') { run = ContractStatRun.reduce(run, { type: 'advance' }); continue; }
+                        if (action.type === 'capture') {
+                            const rank = _crRank(action.item.empId);
+                            if (!rank) return { run: ContractStatRun.reduce(run, { type: 'fail', message: action.item.empName + ': position dropdown is not on the page.' }), stop: true };
+                            const idx = action.item.trainPosName ? _srFindOptIdx(rank, action.item.trainPosName) : -1;
+                            if (action.item.stat && idx === -1) return { run: ContractStatRun.reduce(run, { type: 'fail', message: action.item.trainPosName + ' is not in ' + action.item.empName + "'s position list." }), stop: true };
+                            const before = run.phase;
+                            run = ContractStatRun.reduce(run, {
+                                type: 'captured',
+                                origPosVal: rank.value,
+                                origPosName: (rank.options[rank.selectedIndex] && rank.options[rank.selectedIndex].textContent.trim()) || action.item.origPosName,
+                                samePosition: !action.item.stat || idx === rank.selectedIndex
+                            });
+                            if (before === 'capture' && run.phase === 'train') return { run: run, defer: true };
+                            continue;
+                        }
+                        if (action.type === 'train') {
+                            const counts = _crCounts(action.item);
+                            const left = ContractStatRun.remaining(action.item, counts.today, counts.contract, UI.state?.detailed?.trains_available ?? run.trainsLeft ?? 0);
+                            if (left <= 0) {
+                                run = ContractStatRun.reduce(run, { type: 'no-train' });
+                                return { run: run, defer: true };
+                            }
+                        }
+                        if (action.type === 'switch-confirm' && !_crUpdateVis(action.item.empId)) {
+                            run = ContractStatRun.reduce(run, { type: 'switch-confirm-ok' });
+                            return { run: run, defer: true };
+                        }
+                        if (action.type === 'restore-confirm' && action.item && String((_crRank(action.item.empId) || {}).value || '') === String(action.item.origPosVal || '') && !_crUpdateVis(action.item.empId)) {
+                            run = ContractStatRun.reduce(run, { type: 'restore-confirm-ok' });
+                            return { run: run, defer: true };
+                        }
+                        return { run: run, defer: false };
+                    }
+                    return { run: run, stop: true };
+                };
+                async function _crStep() {
+                    if (_crBusy) {
+                        _crStatus('Finish the current click before the next one. Extra clicks are ignored.', '#f59e0b');
+                        return;
+                    }
                     _crBusy = true;
                     _crButtons();
                     try {
-                        let guard = 0;
-                        while (guard++ < 400) {
-                            let run = _crLoad();
-                            if (!run || !run.active) break;
-                            const action = ContractStatRun.action(run);
-                            _crStatus(ContractStatRun.statusText(run) || run.error, run.error ? '#ef4444' : '#f59e0b');
-                            if (action.type === 'idle' || action.type === 'done') break;
-                            if (action.type === 'blocked') { _crStatus(action.message, '#ef4444'); break; }
-                            if (action.type === 'train') {
-                                const counts = _crCounts(action.item);
-                                const left = ContractStatRun.remaining(action.item, counts.today, counts.contract, UI.state?.detailed?.trains_available ?? run.trainsLeft ?? 0);
-                                if (left <= 0) {
-                                    run = ContractStatRun.reduce(run, { type: 'no-train' });
-                                    _crSave(run);
-                                    continue;
-                                }
-                            }
-                            if (action.type === 'advance') {
-                                run = ContractStatRun.reduce(run, { type: 'advance' });
-                                _crSave(run);
-                                continue;
-                            }
-                            const result = await _crPerform(action);
-                            run = ContractStatRun.reduce(_crLoad() || run, result);
-                            _crSave(run);
-                            if (result.type === 'fail') _crStatus(run.error, '#ef4444');
+                        const mode = (Storage.getSettings() || {}).rotationMode || 'priority';
+                        if (mode !== 'contract_rotational') {
+                            _crStatus('Select Contracts, then press the step button. Changing the mode does not train or move anyone.', '#f59e0b');
+                            return;
                         }
+                        let run = _crLoad();
+                        if (!run || !run.active) {
+                            if (!UI.state) {
+                                _crStatus('Company data is not loaded yet. Open the TCM panel once, then press the step button again.', '#ef4444');
+                                return;
+                            }
+                            const begun = ContractStatRun.begin(_crBuild(), UI.state.detailed?.trains_available ?? 0);
+                            if (!begun.run.active) {
+                                _crStatus(begun.error || 'No contract trains are ready.', '#ef4444');
+                                return;
+                            }
+                            run = begun.run;
+                        }
+                        const settled = _crSettle(run);
+                        run = settled.run;
+                        _crSave(run);
+                        if (!run || !run.active || run.phase === 'blocked' || run.phase === 'idle' || run.phase === 'done') {
+                            _crStatus(ContractStatRun.statusText(run) || run.error || 'No further contract step.', run.error ? '#ef4444' : '#9ca3af');
+                            return;
+                        }
+                        const action = ContractStatRun.action(run);
+                        if (settled.defer || !_crMutating[action.type]) {
+                            _crStatus(ContractStatRun.statusText(run), run.error ? '#ef4444' : '#f59e0b');
+                            return;
+                        }
+                        const result = await _crPerform(action);
+                        run = ContractStatRun.reduce(_crLoad() || run, result);
+                        _crSave(run);
+                        _crStatus(result.type === 'fail' ? (run.error || result.message) : ContractStatRun.statusText(run), result.type === 'fail' ? '#ef4444' : '#f59e0b');
+                    } catch (err) {
+                        console.error('[TCM] contract step', err);
+                        const run = _crLoad();
+                        const message = 'Contract step failed: ' + ((err && err.message) || err);
+                        if (run && run.active) _crSave(ContractStatRun.reduce(run, { type: 'fail', message: message }));
+                        _crStatus(message, '#ef4444');
                     } finally {
                         _crBusy = false;
                         _crButtons();
-                        const run = _crLoad();
-                        if (run && run.error) _crStatus(run.error, '#ef4444');
-                        else if (!run || !run.active) _crStatus((run && run.phase === 'done') ? 'Contract training finished.' : 'Idle. Changing TCM Mode does not train anyone.', '#9ca3af');
                     }
                 }
-                tcmById('tcm-cr-start')?.addEventListener('click', () => {
-                    if (_crBusy) return;
-                    const mode = (Storage.getSettings() || {}).rotationMode || 'priority';
-                    if (mode !== 'contract_rotational') {
-                        _crStatus('Select Contracts, then press Start. Changing the mode does not train anyone.', '#f59e0b');
-                        return;
-                    }
-                    const existing = _crLoad();
-                    if (existing && existing.active) { _crLoop(); return; }
-                    if (!UI.state) { _crStatus('Company data is not loaded yet.', '#ef4444'); return; }
-                    const plan = _crBuild();
-                    const begun = ContractStatRun.begin(plan, UI.state.detailed?.trains_available ?? 0);
-                    if (!begun.run.active) { _crStatus(begun.error, '#ef4444'); return; }
-                    _crSave(begun.run);
-                    _crLoop();
+                if (!_crStartBtn || !_crStatusEl) {
+                    console.error('[TCM] contract training controls were not created');
+                }
+                _crStartBtn?.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    _crStep();
                 });
-                tcmById('tcm-cr-cancel')?.addEventListener('click', () => {
-                    const run = _crLoad();
-                    if (!run || !run.active || _crBusy) return;
-                    _crSave(ContractStatRun.reduce(run, { type: 'cancel' }));
-                    _crLoop();
+                _crCancelBtn?.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    try {
+                        if (_crBusy) {
+                            _crStatus('This click is still finishing. Cancel does not queue another action.', '#f59e0b');
+                            return;
+                        }
+                        const run = _crLoad();
+                        if (!run || !run.active) {
+                            _crStatus('No contract step is active.', '#9ca3af');
+                            return;
+                        }
+                        const item = ContractStatRun.current(run);
+                        const away = item && ((item.switched && !item.restored)
+                            || run.phase === 'switch-confirm'
+                            || run.phase === 'restore-set'
+                            || run.phase === 'restore-confirm');
+                        if (away) {
+                            run.phase = 'restore-set';
+                            run.stopAfterRestore = true;
+                            run.error = '';
+                            _crSave(run);
+                            _crStatus('Press the button to restore ' + item.empName + '. Cancel does not move them.', '#f59e0b');
+                            _crButtons();
+                            return;
+                        }
+                        const stopped = ContractStatRun.reduce(run, { type: 'cancel' });
+                        _crSave(stopped);
+                        _crStatus('Contract steps cleared. Nobody was moved.', '#9ca3af');
+                        _crButtons();
+                    } catch (err) {
+                        _crStatus('Cancel failed: ' + ((err && err.message) || err), '#ef4444');
+                    }
                 });
                 _crButtons();
                 const _crExisting = _crLoad();
                 if (_crExisting && _crExisting.active) {
-                    _crStatus('Interrupted run saved for ' + ((ContractStatRun.current(_crExisting) || {}).empName || 'an employee') + '. Press Resume. The next contract will not start until this position is restored.', '#f59e0b');
+                    if (_crExisting.phase === 'blocked') {
+                        _crStatus(_crExisting.error || 'Stopped. Nothing else will be clicked.', '#ef4444');
+                    } else {
+                        _crStatus('Saved step for ' + ((ContractStatRun.current(_crExisting) || {}).empName || 'an employee') + '. Press the button once for the next action. Reload does not continue by itself.', '#f59e0b');
+                    }
                 }
 
 
@@ -22779,6 +22888,8 @@ const trainNextBtn = tcmById('tcm-train-next-btn');
         window.__TCM_TEST_HOOKS.GistJournal = GistJournal;
         window.__TCM_TEST_HOOKS.GistSync = GistSync;
         window.__TCM_TEST_HOOKS.ContractStatRun = ContractStatRun;
+        window.__TCM_TEST_HOOKS.UI = UI;
+        window.__TCM_TEST_HOOKS.Storage = Storage;
     }
     tcmBoot();
 

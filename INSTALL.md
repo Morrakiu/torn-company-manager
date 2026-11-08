@@ -1,6 +1,6 @@
 # Install TCM
 
-**Version:** 11.1.0-beta · **Author:** Morrakiu
+**Version:** 11.1.1-beta · **Author:** Morrakiu
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or enable custom scripts in Torn PDA.
 2. Open the raw script and choose Install:
