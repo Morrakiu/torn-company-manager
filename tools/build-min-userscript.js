@@ -14,7 +14,8 @@ let header = src.slice(0, cut + marker.length);
 const body = src.slice(cut + marker.length);
 header = header
   .replace(/Torn_Company_Manager\.user\.js/g, 'Torn_Company_Manager.min.user.js')
-  .replace('@name         TCM ALPHA', '@name         TCM ALPHA (min)');
+  .replace('@name         TCM ALPHA', '@name         TCM (min)')
+  .replace('@name         TCM\n', '@name         TCM (min)\n');
 
 (async () => {
   const result = await minify(body, {

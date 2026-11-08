@@ -1,136 +1,90 @@
-# Morrakiu's Company Manager
+# TCM
 
-Tampermonkey / Torn PDA userscript for **company directors** on [Torn.com](https://www.torn.com).
+Tampermonkey and Torn PDA userscript for company directors on [Torn](https://www.torn.com).
 
+**Version:** 11.0.0-beta  
 **Author:** Morrakiu  
-**Version:** 3.25.2  
-**Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) — Tampermonkey auto-updates from GitHub branch **`Morrakiu-TCM-Beta`** — **full v3.25.2** userscript (raw install via Tampermonkey / PDA)
+**Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) on branch `Morrakiu-TCM-Beta`
 
----
-
-## Features
-
-### Company overview
-- Stars, type, headcount, daily/weekly income
-- Popularity, efficiency, work environment, advertising budget (when the API provides them)
-- **Metrics** tab — weekly history (up to 4 ISO weeks) vs previous week
-- **Finance** — daily payroll, profit after wages, margin %, today vs average day, **salary-ratio warning** (≥60% payroll/income)
-- **Stock** — days left, critical/watch, suggested order qty (~7 days when sales data exists)
-- Director vs employee detection; **Director / Employee view** toggle
-
-### Tabs
-
-| Tab | Contents |
-|-----|----------|
-| **Training** | Smart Training queue (**Fair share** / **Star push**), train log |
-| **Employees** | Recommendations, best-position advisor (greedy company-wide assignment), role-fit dropdowns, inactive alerts, **EE promotion path** |
-| **Peers** | API-only peer list + role mix; benchmark filters |
-| **Metrics** | Week-over-week company metrics |
-| **Discord** | Permanent log + daily panel + weekly panel webhooks · 18:00 TCT auto-post |
-
-### Smart Training
-- Estimates trains/day from star rating (+ trainer if staffed)
-- **Fair share** — low WS efficiency / effectiveness and tenure fairness
-- **Star push** — staff closest under the next EE tier
-- **+Train** logs a train after you use it in-game (does not spend trains)
-
-### Best position advisor
-- Position requirements for common company types
-- **Role-fit scoring** + greedy assignment (anti-stacking; priority roles first)
-- **Peer role-mix targets** — when Peers data exists, assignment biases toward high-earning peer staffing ratios (scaled to your headcount); falls back to soft-cap spread otherwise
-- Per-employee effectiveness vs every role; explicit **→ Role** move suggestions
-- Inactive employees: warn ≥3d, replace threshold ≥7d (`last_action` from API)
-- EE promotion hints toward tiers 50 / 100 / 150 / 200
-
-### Peers / Benchmark (API only — no page scraping)
-Compliant with Torn scripting rules: **Torn API only** for peer data.
-
-1. **`company/{typeId}/companies`** — list companies of your type (rating, income, capacity)
-2. **Filter** — 10★ only · same ★ (higher $) · above ★ · top (8★+ higher $); optional **same size**
-3. **`company/{id}?selections=employees`** — public employee **positions** for role-mix averages
-4. **Income rank** among listed companies of your type
-5. Weekly list refresh gated around **Sunday 18:00 TCT**; shared via JSONBin when Data Sync is on
-
-YATA is used only as a fallback ID list if Torn’s companies list fails.
-
-### Discord reports
-- **Permanent log** — append each daily run  
-- **Daily data panel** — edit the same message daily  
-- **Weekly panel** — Sundays 18:00 TCT (week-over-week + staffing/company changes)  
-- **4-week trend** — updated on the **first Sunday of the month** (panel + optional permanent log)  
-- Multi-device dedupe via JSONBin claims  
-- Report types: Unused Trains · Daily Metrics · Employee Alerts · Star Up/Down  
-
-### Data Sync (Web ↔ PDA) + Google Sheets
-| Channel | Purpose |
-|---------|---------|
-| **JSONBin.io** | Two-way: trains, metrics, Discord settings/meta, peer lists |
-| **Google Sheets** | Optional **one-way export** via Apps Script web app (Finance, Trains, Metrics, Peers, Stock, TornStats import) |
-
----
-
-## Install
-
-See [INSTALL.md](./INSTALL.md).
-
-**Raw auto-update URL:**
 https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
 
----
+The script name is `TCM`. There is no active Alpha release.
 
-## JSONBin starter
+## What it does
 
-JSONBin rejects a blank body. Create a bin with:
+Decision support only. It does not train, restock, or message for you.
 
-```json
-{
-  "version": 5,
-  "updated": 0,
-  "company_id": null,
-  "company_name": null,
-  "trains": {},
-  "metrics": { "weeks": {} },
-  "peers": {},
-  "discord": {
-    "logWebhook": "",
-    "panelWebhook": "",
-    "weeklyWebhook": "",
-    "opts": {},
-    "meta": {}
-  }
-}
+- Company, finance, stock, and employee effectiveness from the Torn API
+- Training log import from `/v2/user/log` type 6263, promotion and rotation planning
+- Optional Discord reports and a one-way Google Sheets export
+- Private GitHub Gist sync between your own browsers and Torn PDA
+
+## API key
+
+Use a Torn API key that can read your company. Training history also needs user log access (a full-access key, or a custom key that includes user → log). A key that is too limited still shows company data and a warning for the training log.
+
+The key stays in this device's script storage. It is not written to the gist.
+
+## Gist sync
+
+Sync is a private gist with one journal file per device, `tcm-j-<deviceId>.json`, plus a one-time baseline file `tcm-b-<deviceId>.json`.
+
+GitHub's update-gist documentation says files you do not mention in a PATCH stay unchanged. The documented success codes are 200, 404, and 422. `If-Match` / HTTP 412 is not documented for that endpoint, and conditional headers on other GitHub PATCH routes have applied the write even when they returned 412. TCM does not send `If-Match`.
+
+Each device appends its own operations and PATCHes only its own files. A Lamport counter plus the list of other journals already seen decides order. The wall clock does not. Merge is a pure function of those files:
+
+- Different fields (two settings, a contract note and a payment, a queue and a pointer) both stay.
+- A later edit that has already seen the other device's journal wins.
+- Two edits to the same field that have not seen each other both remain listed under Settings. One value is kept so every device converges: higher Lamport counter, then device id. The other value stays in that list until you dismiss it.
+- Deletes of an excluded employee, a payment, a join or reset date, or a settings field are operations. They are not capped at 400 and are not unioned back in.
+- The calendar day in `lastLogPostDateTCT` keeps the later date.
+- Restoring a local snapshot writes new operations after every journal this device has already read, so the restore beats that snapshot of history.
+
+Before the first schema-2 sync, TCM stores `gist_schema_backup_v2` on this device only.
+
+### What this does not guarantee
+
+A gist PATCH is not an atomic commit across devices. TCM reads the gist after its own write and sends the local journal again until a later read contains those bytes. If a racing update drops another device's journal file, TCM puts that file back only when it still has the exact bytes from the read taken before the write. The owner rewrites its journal from local storage on its next sync.
+
+That converges while each device eventually completes a write that is still present on a following read. It does not eliminate a lost update if a device dies after a write that no peer cached and that the server did not keep. Torn PDA is not disabled when response headers are missing; headers are not part of the merge.
+
+### Mixed versions
+
+10.13 and earlier write a single `tcm-data.json` and will not read journals. 11.0.0 imports that file once as a baseline, then ignores later overwrites of it. An old install can still replace `tcm-data.json` without touching journals, so those edits never reach upgraded devices.
+
+Upgrade every device to 11.0.0 before changing data on more than one of them. Open each device once online after the update so it can write its journal. After that, edit as usual.
+
+### JSONBin
+
+JSONBin is not a sync path. If this device still has a bin id and master key from an older install, the first online launch copies records that are not already local, then deletes those keys. A failed copy keeps the keys and retries next launch. Keys are not shown in the page.
+
+### Token
+
+Create a GitHub token with only the gist scope (classic) or fine-grained Gists read/write. Put the same gist id on each device. The token is stored only on that device.
+
+## Tests
+
+From a checkout, with Node, `jsdom`, and `terser`:
+
+```bash
+node --check Torn_Company_Manager.user.js
+node tools/tcm-log-page-test.js
+node tools/tcm-boot-check.js
+node tools/tcm-sync-harness.js
+node tools/build-min-userscript.js
 ```
 
-1. [jsonbin.io](https://jsonbin.io) → create bin → copy **Bin ID** + **Master Key**  
-2. Panel → **Data Sync** → paste → **Save settings** → **JSONBin Sync Now**  
-3. Same Bin ID + key on every device (web + PDA)
+The sync harness is an in-memory two-device gist. It does not call GitHub and does not use a real account.
 
----
+## Manual checks after install
 
-## Changelog (high level)
+1. Update from the Beta raw URL in Tampermonkey and in Torn PDA. The panel should open on `companies.php`.
+2. Refresh with a key that can read user logs, then with a key that cannot, and confirm the training-log warning.
+3. On two devices, change different settings and confirm both stick. Change the same setting on both while offline, sync, and confirm Settings lists the conflict.
+4. Remove someone from rotation exclude, delete a contract payment, and confirm the other device does not put them back.
+5. During a company switch, Sync Now should say it is waiting, not upload an empty training log.
+6. Turn the device clock far ahead, edit on the other device after it has synced, and confirm the later edit still wins.
 
-### 3.25.x
-- Training contracts (sales tracking, progress, daily reservation, JSONBin)
-- Train Calculator + best-role recommendation
-- Daily training plan with reservations / settling / exclude
-- Best Position Advisor uses **peer role-mix** targets (API only)
-- Opt-in role-share pool **removed** (v3.25.2)
+## License
 
-### 3.20.0
-- Peer **benchmark filters** (10★ / same / above / top + same size)  
-- Income rank; position aliases; salary-ratio warn; EE promotion path  
-
-### 3.19.x
-- API peer roles via `employees` selection  
-- Inactive employee alerts; scraping removed for compliance  
-
-### 3.11.x – 3.18.x
-- Mobile layout; finance/stock/EE/train modes; Metrics tab; Director/Employee view  
-- Discord permanent / daily / weekly / 4-week panels; multi-device claims  
-- Greedy role recommendations; weekly metrics history  
-
----
-
-## License / support
-
-Personal use. Comply with Torn rules. Issues and updates via this repository.
+Personal use. Follow Torn's API and scripting rules.

@@ -1,15 +1,9 @@
-# Full script upload
+# Publishing TCM
 
-The complete `Torn_Company_Manager.user.js` (v3.25.2, ~340KB) exceeds the automated GitHub tool payload limit used in this environment.
+The release branch is `Morrakiu-TCM-Beta`. Install and auto-update use:
 
-## Upload the full file (one minute)
+https://raw.githubusercontent.com/Morrakiu/torn-company-manager/Morrakiu-TCM-Beta/Torn_Company_Manager.user.js
 
-1. Open https://github.com/Morrakiu/torn-company-manager/tree/Morrakiu-TCM-Beta
-2. Click **Torn_Company_Manager.user.js** → **pencil (Edit)** or upload a new file
-3. Paste/replace with the full contents from your project artifact:
-   - Local path: `artifacts/Torn_Company_Manager.user.js`
-4. Commit to **`Morrakiu-TCM-Beta`**
+Current release: **11.0.0-beta**. The userscript and `Torn_Company_Manager.min.user.js` are both committed. Rebuild the minified file with `node tools/build-min-userscript.js` after changing the source (requires `terser`).
 
-README.md and INSTALL.md on `Morrakiu-TCM-Beta` already document v3.25.2 (peer role-mix advisor API-only, training contracts, calculator, daily plan).
-
-Until the full file is uploaded, install from the local artifact via Tampermonkey → Create new script → paste.
+There is no active Alpha branch. Historical backups, including `Morrakiu-TCM-Alpha-backup-1031` and `Morrakiu-TCM-Beta-backup-1105`, are not release channels.

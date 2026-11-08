@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TCM ALPHA
+// @name         TCM
 // @namespace    TCM
-// @version      10.13.1-beta
+// @version      11.0.0-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -388,7 +388,7 @@
 
 
     const TCM = {
-        VERSION: '10.13.1-beta',
+        VERSION: '11.0.0-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -1455,20 +1455,26 @@ getTodayTrained() {
             });
         },
         _mergeRetiredJsonBin(body) {
-            if (!body || typeof body !== 'object' || typeof GistMerge === 'undefined' || typeof GistSync === 'undefined') return;
-            const remote = GistMerge.emptyData();
+            if (!body || typeof body !== 'object' || typeof GistJournal === 'undefined' || typeof GistSync === 'undefined') return;
+            const remote = {};
             const keys = ['trained_log', 'train_sales', 'paid_contracts', 'snapshots', 'rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings'];
             for (let i = 0; i < keys.length; i++) {
                 if (body[keys[i]] != null) remote[keys[i]] = body[keys[i]];
             }
-            if (remote.settings && typeof remote.settings === 'object') {
-                Object.keys(remote.settings).forEach(k => {
-                    if (GistMerge.SECRET.has(k)) delete remote.settings[k];
-                    else if (/key|secret|token|password/i.test(k) && typeof remote.settings[k] === 'string') delete remote.settings[k];
-                });
+            GistSync.arm();
+            const remoteFlat = GistJournal.flatten(remote);
+            const localFlat = GistJournal.flatten(GistSync._collect());
+            const add = [];
+            for (const path of Object.keys(remoteFlat)) {
+                if (!Object.prototype.hasOwnProperty.call(localFlat, path)) add.push({ path: path, op: 'set', value: remoteFlat[path] });
             }
-            const local = GistSync._decorate(GistSync._collect());
-            GistSync._apply(GistMerge.mergeData(local, remote));
+            if (add.length) {
+                GistSync._journal = GistJournal.append(GistSync._journal, add);
+                GistSync._saveJournal();
+                const folded = GistJournal.fold([], [GistSync._journal]);
+                GistSync._applyFolded(GistJournal.unflatten(folded.flat));
+                GistSync._flat = GistJournal.flatten(GistSync._collect());
+            }
         },
         _finishJsonBinRemoval() {
             _tcmGmDel(TCM.NS + 'jsonbin_sync_cfg');
@@ -2764,7 +2770,7 @@ function runCapture() {
             const clean = this.cleanEmbeds(embeds);
             const tct = this.getTCTParts();
             const body = {
-                username: 'TCM ALPHA',
+                username: 'TCM',
                 content: '**Company reports** · **' + tct.dateStr + '** TCT' + (force ? ' (manual)' : ''),
                 embeds: clean
             };
@@ -3253,6 +3259,474 @@ function runCapture() {
     };
     /*GIST_PURE_END*/
 
+    /**
+     * Per-device gist journals (schema 2).
+     *
+     * GitHub's Update-a-gist docs say files you do not mention stay as they
+     * are. They do not list If-Match or HTTP 412 for that endpoint, and
+     * conditional headers on other GitHub PATCH routes have been observed to
+     * return 412 while still applying the write. This code does not use
+     * If-Match and does not treat a read-back as a lock.
+     *
+     * Each device writes only tcm-j-<deviceId>.json (and, once, tcm-b-<id>.json).
+     * Ordering uses a Lamport counter plus the set of other journals already
+     * observed, never the wall clock. Merge is a pure function of those files.
+     * A write that does not stick is retried from the local journal. That
+     * converges when each device can finish a write that is still present on
+     * a later read. It is not an atomic multi-device commit: a journal can
+     * be missing until its owner, or a peer that still has the exact bytes,
+     * writes it again.
+     */
+    const GistJournal = {
+        SCHEMA: 2,
+        emptyJournal(deviceId) {
+            return { schema: 2, deviceId: deviceId, lamport: 0, seq: 0, seen: {}, ops: [] };
+        },
+        clone(v) {
+            if (v == null) return v;
+            return JSON.parse(JSON.stringify(v));
+        },
+        canon(v) {
+            if (v === undefined) return 'null';
+            if (v === null || typeof v !== 'object') return JSON.stringify(v);
+            if (Array.isArray(v)) return '[' + v.map(x => this.canon(x)).join(',') + ']';
+            const keys = Object.keys(v).sort();
+            return '{' + keys.map(k => JSON.stringify(k) + ':' + this.canon(v[k])).join(',') + '}';
+        },
+        same(a, b) { return this.canon(a) === this.canon(b); },
+        hash(s) {
+            let h = 2166136261;
+            const str = String(s);
+            for (let i = 0; i < str.length; i++) {
+                h ^= str.charCodeAt(i);
+                h = Math.imul(h, 16777619);
+            }
+            return (h >>> 0).toString(16);
+        },
+        enc(s) { return encodeURIComponent(String(s)); },
+        dec(s) { try { return decodeURIComponent(s); } catch (e) { return s; } },
+        isSecretKey(k, v) {
+            if (k === 'updatedAt') return true;
+            const names = ['apiKey', 'api_key', 'companyKey', 'company_key', 'password', 'token', 'secret', 'masterKey', 'master_key', 'githubToken', 'gistToken'];
+            if (names.indexOf(k) >= 0) return true;
+            return /key|secret|token|password/i.test(k) && typeof v === 'string' && v.length > 24;
+        },
+        isDatePath(path) {
+            return /\/lastLogPostDateTCT$|\/lastPostDateTCT$/.test(String(path || ''));
+        },
+        logKey(e) {
+            if (!e || typeof e !== 'object') return '';
+            return String(e._logId || e.ts || ((e.date || '') + '|' + (e.note || '') + '|' + (e.amount || '')));
+        },
+        saleKey(c) {
+            if (!c) return '';
+            return String(c.id || ((c.paidAt || '') + '|' + (c.totalEarned || 0) + '|' + (c.buyerEmpId || '')));
+        },
+        _flatObj(prefix, obj, out) {
+            const walk = (p, v) => {
+                if (v && typeof v === 'object' && !Array.isArray(v)) {
+                    const keys = Object.keys(v).filter(k => !this.isSecretKey(k, v[k]) && k !== 'updatedAt');
+                    if (!keys.length) {
+                        if (p !== prefix) out[p] = {};
+                        return;
+                    }
+                    for (let i = 0; i < keys.length; i++) walk(p + '/' + this.enc(keys[i]), v[keys[i]]);
+                    return;
+                }
+                out[p] = v;
+            };
+            walk(prefix, obj || {});
+        },
+        flatten(state) {
+            const out = {};
+            const s = state || {};
+            const log = s.trained_log || {};
+            for (const emp of Object.keys(log)) {
+                const arr = Array.isArray(log[emp]) ? log[emp] : [];
+                const seen = new Set();
+                for (let i = 0; i < arr.length; i++) {
+                    const key = this.logKey(arr[i]);
+                    if (!key || seen.has(key)) continue;
+                    seen.add(key);
+                    const copy = this.clone(arr[i]) || {};
+                    delete copy.updatedAt;
+                    out['log/' + this.enc(emp) + '/' + this.enc(key)] = copy;
+                }
+            }
+            this._flatRecords('sale', s.train_sales, out);
+            this._flatRecords('paid', s.paid_contracts, out);
+            this._flatRecords('snap', s.snapshots, out, 'date');
+            const rot = s.rotation || {};
+            out['rot/queue'] = Array.isArray(rot.queue) ? this.clone(rot.queue) : [];
+            out['rot/pointer'] = Number(rot.pointer) || 0;
+            out['rot/start'] = rot.startDate || '';
+            const excluded = Array.isArray(rot.excluded) ? rot.excluded : [];
+            for (let i = 0; i < excluded.length; i++) out['rot/ex/' + this.enc(excluded[i])] = 1;
+            const joins = rot.joinDates || {};
+            for (const id of Object.keys(joins)) out['rot/join/' + this.enc(id)] = joins[id];
+            const resets = rot.resetDates || {};
+            for (const id of Object.keys(resets)) out['rot/reset/' + this.enc(id)] = resets[id];
+            for (const k of Object.keys(rot)) {
+                if (['queue', 'pointer', 'excluded', 'startDate', 'joinDates', 'resetDates', 'updatedAt'].indexOf(k) >= 0) continue;
+                if (this.isSecretKey(k, rot[k])) continue;
+                out['rot/x/' + this.enc(k)] = this.clone(rot[k]);
+            }
+            this._flatObj('set', s.settings || {}, out);
+            this._flatObj('sch', s.schedule_config || {}, out);
+            this._flatObj('sov', s.schedule_overrides || {}, out);
+            this._flatObj('goog', s.google_sync_cfg || {}, out);
+            this._flatObj('disc', s.discord_cfg || {}, out);
+            this._flatObj('ovr', s.overrides || {}, out);
+            return out;
+        },
+        _flatRecords(prefix, list, out, idField) {
+            const arr = Array.isArray(list) ? list : [];
+            for (let i = 0; i < arr.length; i++) {
+                const rec = arr[i];
+                if (!rec || typeof rec !== 'object') continue;
+                const id = idField ? rec[idField] : this.saleKey(rec);
+                if (id == null || id === '') continue;
+                const copy = this.clone(rec);
+                delete copy.updatedAt;
+                const pays = Array.isArray(copy.payments) ? copy.payments : [];
+                delete copy.payments;
+                const base = prefix + '/' + this.enc(id);
+                out[base + '/@'] = 1;
+                for (const field of Object.keys(copy)) {
+                    if (field === 'updatedAt' || this.isSecretKey(field, copy[field])) continue;
+                    out[base + '/f/' + this.enc(field)] = copy[field];
+                }
+                for (let p = 0; p < pays.length; p++) {
+                    const pay = pays[p];
+                    if (!pay || pay.id == null || pay.id === '') continue;
+                    const pc = this.clone(pay);
+                    delete pc.updatedAt;
+                    out[base + '/p/' + this.enc(pay.id)] = pc;
+                }
+            }
+        },
+        _put(root, parts, value) {
+            if (!parts.length) return;
+            let cur = root;
+            for (let i = 0; i < parts.length - 1; i++) {
+                const k = this.dec(parts[i]);
+                if (!cur[k] || typeof cur[k] !== 'object' || Array.isArray(cur[k])) cur[k] = {};
+                cur = cur[k];
+            }
+            cur[this.dec(parts[parts.length - 1])] = this.clone(value);
+        },
+        _recordsFrom(map, idField) {
+            const out = [];
+            for (const rec of map.values()) {
+                const obj = Object.assign({}, rec.fields);
+                if (idField) {
+                    if (obj[idField] == null || obj[idField] === '') obj[idField] = rec.id;
+                } else if (obj.id == null || obj.id === '') obj.id = rec.id;
+                if (rec.pays.length) obj.payments = rec.pays;
+                out.push(obj);
+            }
+            out.sort((a, b) => String(idField ? a[idField] : a.id).localeCompare(String(idField ? b[idField] : b.id)));
+            return out;
+        },
+        unflatten(flat) {
+            const state = {
+                trained_log: {},
+                train_sales: [],
+                paid_contracts: [],
+                snapshots: [],
+                rotation: { queue: [], pointer: 0, excluded: [], startDate: '', joinDates: {}, resetDates: {} },
+                schedule_config: {},
+                schedule_overrides: {},
+                google_sync_cfg: {},
+                discord_cfg: {},
+                overrides: {},
+                settings: {}
+            };
+            const sales = new Map();
+            const paids = new Map();
+            const snaps = new Map();
+            const ensure = (map, id) => {
+                if (!map.has(id)) map.set(id, { id: id, fields: {}, pays: [] });
+                return map.get(id);
+            };
+            const paths = Object.keys(flat || {}).sort();
+            for (let i = 0; i < paths.length; i++) {
+                const path = paths[i];
+                const v = flat[path];
+                if (path.indexOf('log/') === 0) {
+                    const bits = path.slice(4).split('/');
+                    const emp = this.dec(bits[0]);
+                    if (!state.trained_log[emp]) state.trained_log[emp] = [];
+                    state.trained_log[emp].push(this.clone(v));
+                } else if (path.indexOf('sale/') === 0) {
+                    this._takeRecord(sales, path.slice(5), v, ensure);
+                } else if (path.indexOf('paid/') === 0) {
+                    this._takeRecord(paids, path.slice(5), v, ensure);
+                } else if (path.indexOf('snap/') === 0) {
+                    this._takeRecord(snaps, path.slice(5), v, ensure);
+                } else if (path === 'rot/queue') state.rotation.queue = this.clone(v) || [];
+                else if (path === 'rot/pointer') state.rotation.pointer = Number(v) || 0;
+                else if (path === 'rot/start') state.rotation.startDate = v || '';
+                else if (path.indexOf('rot/ex/') === 0) state.rotation.excluded.push(this.dec(path.slice(7)));
+                else if (path.indexOf('rot/join/') === 0) state.rotation.joinDates[this.dec(path.slice(9))] = v;
+                else if (path.indexOf('rot/reset/') === 0) state.rotation.resetDates[this.dec(path.slice(10))] = v;
+                else if (path.indexOf('rot/x/') === 0) state.rotation[this.dec(path.slice(6))] = this.clone(v);
+                else if (path.indexOf('set/') === 0) this._put(state.settings, path.slice(4).split('/'), v);
+                else if (path.indexOf('sch/') === 0) this._put(state.schedule_config, path.slice(4).split('/'), v);
+                else if (path.indexOf('sov/') === 0) this._put(state.schedule_overrides, path.slice(4).split('/'), v);
+                else if (path.indexOf('goog/') === 0) this._put(state.google_sync_cfg, path.slice(5).split('/'), v);
+                else if (path.indexOf('disc/') === 0) this._put(state.discord_cfg, path.slice(5).split('/'), v);
+                else if (path.indexOf('ovr/') === 0) this._put(state.overrides, path.slice(4).split('/'), v);
+            }
+            for (const emp of Object.keys(state.trained_log)) {
+                state.trained_log[emp].sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0) || String(this.logKey(a)).localeCompare(String(this.logKey(b))));
+            }
+            state.rotation.excluded.sort();
+            state.train_sales = this._recordsFrom(sales);
+            state.paid_contracts = this._recordsFrom(paids);
+            state.snapshots = this._recordsFrom(snaps, 'date');
+            return state;
+        },
+        _takeRecord(map, rest, v, ensure) {
+            const bits = rest.split('/');
+            const id = this.dec(bits[0]);
+            const rec = ensure(map, id);
+            if (bits[1] === 'f' && bits[2] != null) rec.fields[this.dec(bits[2])] = this.clone(v);
+            else if (bits[1] === 'p' && bits[2] != null) rec.pays.push(this.clone(v));
+        },
+        diff(prev, next) {
+            const ops = [];
+            const keys = {};
+            for (const k of Object.keys(prev || {})) keys[k] = 1;
+            for (const k of Object.keys(next || {})) keys[k] = 1;
+            const paths = Object.keys(keys).sort();
+            for (let i = 0; i < paths.length; i++) {
+                const path = paths[i];
+                const hasP = !!(prev && Object.prototype.hasOwnProperty.call(prev, path));
+                const hasN = !!(next && Object.prototype.hasOwnProperty.call(next, path));
+                if (hasP && !hasN) ops.push({ path: path, op: 'del' });
+                else if (hasN && (!hasP || !this.same(prev[path], next[path]))) ops.push({ path: path, op: 'set', value: this.clone(next[path]) });
+            }
+            return ops;
+        },
+        observe(journal, others) {
+            const j = this.clone(journal);
+            j.seen = Object.assign({}, j.seen || {});
+            j.ops = j.ops || [];
+            for (let i = 0; i < (others || []).length; i++) {
+                const o = others[i];
+                if (!o || !o.deviceId || o.deviceId === j.deviceId) continue;
+                let maxSeq = 0;
+                let maxL = Number(o.lamport) || 0;
+                for (let k = 0; k < (o.ops || []).length; k++) {
+                    const op = o.ops[k];
+                    if ((op.seq || 0) > maxSeq) maxSeq = op.seq;
+                    if ((op.lamport || 0) > maxL) maxL = op.lamport;
+                }
+                j.seen[o.deviceId] = Math.max(j.seen[o.deviceId] || 0, maxSeq);
+                j.lamport = Math.max(j.lamport || 0, maxL);
+            }
+            return j;
+        },
+        append(journal, rawOps) {
+            const j = this.clone(journal);
+            j.ops = j.ops || [];
+            j.seen = Object.assign({}, j.seen || {});
+            for (let i = 0; i < (rawOps || []).length; i++) {
+                const raw = rawOps[i];
+                if (!raw || !raw.path) continue;
+                j.seq = (j.seq || 0) + 1;
+                j.lamport = (j.lamport || 0) + 1;
+                const op = {
+                    id: j.deviceId + ':' + j.seq,
+                    seq: j.seq,
+                    lamport: j.lamport,
+                    device: j.deviceId,
+                    seen: Object.assign({}, j.seen),
+                    path: raw.path,
+                    op: raw.op === 'del' ? 'del' : 'set'
+                };
+                if (op.op === 'set') op.value = this.clone(raw.value);
+                j.ops.push(op);
+            }
+            j.ops = this.compactOps(j.ops);
+            return j;
+        },
+        isAfter(later, earlier) {
+            if (!later || !earlier || later.id === earlier.id) return false;
+            if (later.device && later.device === earlier.device) return (later.seq || 0) > (earlier.seq || 0);
+            const seen = later.seen || {};
+            return (seen[earlier.device] || 0) >= (earlier.seq || 0);
+        },
+        cmp(a, b) {
+            if ((a.lamport || 0) !== (b.lamport || 0)) return (a.lamport || 0) - (b.lamport || 0);
+            const ad = String(a.device || '');
+            const bd = String(b.device || '');
+            if (ad !== bd) return ad < bd ? -1 : 1;
+            return (a.seq || 0) - (b.seq || 0);
+        },
+        maximal(ops) {
+            return ops.filter(a => !ops.some(b => b && a && b.id !== a.id && this.isAfter(b, a)));
+        },
+        compactOps(ops) {
+            const by = new Map();
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
+                if (!op || !op.path) continue;
+                if (!by.has(op.path)) by.set(op.path, op);
+                else if ((op.seq || 0) >= (by.get(op.path).seq || 0)) by.set(op.path, op);
+            }
+            return Array.from(by.values()).sort((a, b) => (a.seq || 0) - (b.seq || 0));
+        },
+        fold(bases, journals) {
+            const ops = [];
+            const seenIds = new Set();
+            const seenHash = new Set();
+            for (let i = 0; i < (bases || []).length; i++) {
+                const b = bases[i];
+                if (!b || !b.legacyHash || !b.flat || seenHash.has(b.legacyHash)) continue;
+                seenHash.add(b.legacyHash);
+                const paths = Object.keys(b.flat);
+                for (let p = 0; p < paths.length; p++) {
+                    const path = paths[p];
+                    const id = 'base:' + b.legacyHash + ':' + path;
+                    if (seenIds.has(id)) continue;
+                    seenIds.add(id);
+                    ops.push({
+                        id: id, seq: 0, lamport: 0, device: 'base:' + b.legacyHash, seen: {},
+                        path: path, op: 'set', value: b.flat[path]
+                    });
+                }
+            }
+            for (let j = 0; j < (journals || []).length; j++) {
+                const list = (journals[j] && journals[j].ops) || [];
+                for (let k = 0; k < list.length; k++) {
+                    const op = list[k];
+                    if (!op || !op.id || !op.path || seenIds.has(op.id)) continue;
+                    seenIds.add(op.id);
+                    ops.push(op);
+                }
+            }
+            const byPath = new Map();
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
+                if (!byPath.has(op.path)) byPath.set(op.path, []);
+                byPath.get(op.path).push(op);
+            }
+            const flat = {};
+            const conflicts = [];
+            for (const [path, list] of byPath) {
+                if (this.isDatePath(path)) {
+                    const sets = list.filter(op => op.op !== 'del' && op.value != null && String(op.value) !== '');
+                    if (!sets.length) continue;
+                    let best = String(sets[0].value);
+                    for (let i = 1; i < sets.length; i++) if (String(sets[i].value) > best) best = String(sets[i].value);
+                    flat[path] = best;
+                    continue;
+                }
+                const maxes = this.maximal(list).sort((a, b) => this.cmp(a, b));
+                const winner = maxes[maxes.length - 1];
+                if (!winner) continue;
+                if (winner.op !== 'del') flat[path] = winner.value;
+                const distinct = [];
+                const sigs = new Set();
+                for (let i = 0; i < maxes.length; i++) {
+                    const op = maxes[i];
+                    const sig = op.op === 'del' ? 'del' : this.canon(op.value);
+                    if (sigs.has(sig)) continue;
+                    sigs.add(sig);
+                    distinct.push({ device: op.device, lamport: op.lamport || 0, op: op.op, value: op.op === 'del' ? null : op.value });
+                }
+                if (distinct.length > 1) {
+                    conflicts.push({
+                        id: path + '|' + this.hash(distinct.map(d => d.device + ':' + (d.op === 'del' ? 'del' : this.canon(d.value))).sort().join('|')),
+                        path: path,
+                        kept: winner.op === 'del' ? null : winner.value,
+                        keptDevice: winner.device,
+                        values: distinct
+                    });
+                }
+            }
+            return { flat: flat, conflicts: conflicts };
+        },
+        integrate(localJournal, remote, pendingFlat) {
+            const others = (remote.journals || []).filter(j => j && j.deviceId !== localJournal.deviceId);
+            let journal = this.observe(localJournal, others);
+            let pending = pendingFlat || null;
+            if (pending) {
+                const mid = this.fold(remote.bases || [], others.concat([journal]));
+                const raw = this.diff(mid.flat, pending);
+                if (raw.length) journal = this.append(journal, raw);
+                pending = null;
+            }
+            const folded = this.fold(remote.bases || [], others.concat([journal]));
+            const ownName = 'tcm-j-' + journal.deviceId + '.json';
+            const text = this.canonical(journal);
+            const remoteText = remote.files ? remote.files[ownName] : undefined;
+            const upload = {};
+            if (remoteText !== text) upload[ownName] = text;
+            return { journal: journal, flat: folded.flat, conflicts: folded.conflicts, upload: upload, pending: pending, ownName: ownName, text: text };
+        },
+        canonical(journal) {
+            const ops = (journal.ops || []).map(op => {
+                const out = {
+                    id: op.id, seq: op.seq, lamport: op.lamport, device: op.device,
+                    seen: op.seen || {}, path: op.path, op: op.op
+                };
+                if (op.op !== 'del') out.value = op.value;
+                return out;
+            });
+            return this.canon({
+                schema: 2,
+                deviceId: journal.deviceId,
+                lamport: journal.lamport || 0,
+                seq: journal.seq || 0,
+                seen: journal.seen || {},
+                ops: ops
+            });
+        },
+        parseJournal(text) {
+            if (!text || !String(text).trim()) return null;
+            const parsed = JSON.parse(text);
+            if (!parsed || parsed.schema !== 2 || !parsed.deviceId) return null;
+            parsed.ops = parsed.ops || [];
+            parsed.seen = parsed.seen || {};
+            return parsed;
+        },
+        parseGistFiles(fileMap) {
+            const bases = [];
+            const journals = [];
+            const names = Object.keys(fileMap || {});
+            for (let i = 0; i < names.length; i++) {
+                const name = names[i];
+                let parsed = null;
+                try { parsed = JSON.parse(fileMap[name]); } catch (e) { parsed = null; }
+                if (!parsed || parsed.schema !== 2) continue;
+                if (name.indexOf('tcm-b-') === 0 && parsed.kind === 'base' && parsed.flat && parsed.legacyHash) bases.push(parsed);
+                if (name.indexOf('tcm-j-') === 0 && parsed.deviceId) journals.push(parsed);
+            }
+            return { bases: bases, journals: journals };
+        },
+        missingPeers(before, after) {
+            const out = [];
+            const names = Object.keys(before || {});
+            for (let i = 0; i < names.length; i++) {
+                const name = names[i];
+                if (name.indexOf('tcm-j-') !== 0 && name.indexOf('tcm-b-') !== 0) continue;
+                if (!Object.prototype.hasOwnProperty.call(after || {}, name)) out.push(name);
+            }
+            return out;
+        },
+        journalName(deviceId) { return 'tcm-j-' + deviceId + '.json'; },
+        baseName(deviceId) { return 'tcm-b-' + deviceId + '.json'; },
+        fileMatches(text, journal) {
+            const expect = this.canonical(journal);
+            if (text === expect) return true;
+            try { return this.canon(JSON.parse(text)) === expect; } catch (e) { return false; }
+        }
+    };
+
+
     const GistSync = {
         FILE: 'tcm-data.json',
         TRACK: new Set(['trained_log', 'train_sales', 'paid_contracts', 'snapshots', 'rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings']),
@@ -3283,30 +3757,44 @@ function runCapture() {
             const c = this.getCfg();
             return !!(c.token && c.gistId);
         },
+        deviceId() {
+            let id = Storage.get('gist_device_id', '');
+            if (!id || !/^[a-z0-9]{8,16}$/.test(id)) {
+                const raw = String(Storage.get('discord_client_id', '') || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                id = raw.length >= 8 ? raw.slice(0, 12) : '';
+                if (!id) {
+                    id = (Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)).replace(/[^a-z0-9]/g, '').slice(0, 12);
+                    while (id.length < 8) id += '0';
+                }
+                Storage.set('gist_device_id', id);
+            }
+            return id;
+        },
         arm() {
             if (this._ready) return;
-            this._stamps = Storage.get('gist_stamps', {}) || {};
-            this._tombs = Storage.get('gist_tombstones', null) || GistMerge.emptyData().tombstones;
-            this._shadow = this._clone(this._collect());
+            const id = this.deviceId();
+            this._journal = Storage.get('gist_journal_v2', null) || GistJournal.emptyJournal(id);
+            if (!this._journal.deviceId) this._journal.deviceId = id;
+            this._base = Storage.get('gist_base_v2', null);
+            this._flat = GistJournal.flatten(this._collect());
+            this._conflicts = Storage.get('gist_open_conflicts', []) || [];
             this._ready = true;
+        },
+        _saveJournal() {
+            this._applying = true;
+            try { Storage.set('gist_journal_v2', this._journal); }
+            finally { this._applying = false; }
         },
         noteLocalChange(key) {
             if (!this._ready || this._applying) return;
             if (this.IGNORE.has(key) || !this.TRACK.has(key)) return;
-            const nextAll = this._collect();
-            const prevAll = this._shadow || nextAll;
-            const before = JSON.stringify(this._stamps) + '|' + JSON.stringify(this._tombs || {});
-            const diff = GistMerge.stampFromShadow(prevAll, nextAll, { ...this._stamps }, JSON.parse(JSON.stringify(this._tombs || GistMerge.emptyData().tombstones)));
-            this._stamps = diff.stamps;
-            this._tombs = diff.tombs;
-            const after = JSON.stringify(this._stamps) + '|' + JSON.stringify(this._tombs || {});
-            this._shadow = this._clone(nextAll);
-            if (before === after) return;
-            this._applying = true;
-            try {
-                Storage.set('gist_stamps', this._stamps);
-                Storage.set('gist_tombstones', this._tombs);
-            } finally { this._applying = false; }
+            const next = GistJournal.flatten(this._collect());
+            const prev = this._flat || next;
+            const raw = GistJournal.diff(prev, next);
+            this._flat = next;
+            if (!raw.length) return;
+            this._journal = GistJournal.append(this._journal, raw);
+            this._saveJournal();
             this.schedulePush();
         },
         _holdPushes: false,
@@ -3344,8 +3832,9 @@ function runCapture() {
             this.syncNow(reason || 'foreground').catch(() => {});
         },
         syncNow(reason) {
-            if (this._holdPushes && reason === 'manual') this.releasePushes();
-            if (this._holdPushes) return Promise.resolve({ held: true });
+            // A company-change hold must survive Sync Now. Releasing it here
+            // published the wiped training log before the new history loaded.
+            if (this._holdPushes) return Promise.resolve({ held: true, reason: reason || '' });
             if (this._flight) {
                 this._again = reason || this._again || 'followup';
                 return this._flight;
@@ -3365,17 +3854,29 @@ function runCapture() {
             if (!cfg.token) throw new Error('Add a GitHub token with the gist scope first.');
             if (cfg.gistId) return cfg.gistId;
             this.arm();
-            const bundle = {
-                schema: 1,
-                script: 'TCM-ALPHA',
-                scriptVersion: TCM.VERSION,
-                updatedAt: Date.now(),
-                data: this._decorate(this._collect())
-            };
+            this._backupOnce();
+            if (!this._base) {
+                this._base = {
+                    schema: 2, kind: 'base', deviceId: this._journal.deviceId,
+                    legacyHash: 'empty', flat: {}
+                };
+                this._applying = true;
+                try { Storage.set('gist_base_v2', this._base); }
+                finally { this._applying = false; }
+            }
+            const seeded = GistJournal.fold(this._base ? [this._base] : [], [this._journal]);
+            const seed = GistJournal.diff(seeded.flat, GistJournal.flatten(this._collect()));
+            if (seed.length) {
+                this._journal = GistJournal.append(this._journal, seed);
+                this._saveJournal();
+            }
+            const files = {};
+            files[GistJournal.journalName(this._journal.deviceId)] = { content: GistJournal.canonical(this._journal) };
+            files[GistJournal.baseName(this._journal.deviceId)] = { content: GistJournal.canon(this._base) };
             const res = await this._request(cfg, 'POST', 'https://api.github.com/gists', {
-                description: 'TCM ALPHA private sync',
+                description: 'TCM private sync',
                 public: false,
-                files: { 'tcm-data.json': { content: GistCodec.encodeBundle(bundle) } }
+                files: files
             });
             const gist = res.data || {};
             if (!gist.id) throw new Error('GitHub did not return a gist id');
@@ -3385,8 +3886,7 @@ function runCapture() {
             cfg.lastSyncOk = true;
             cfg.lastError = null;
             this.saveCfg(cfg);
-            this._persistStampsFrom(bundle.data);
-            this._shadow = this._clone(this._collect());
+            this._flat = GistJournal.flatten(this._collect());
             return cfg.gistId;
         },
         listSnapshots() {
@@ -3396,9 +3896,13 @@ function runCapture() {
             const snaps = this.listSnapshots();
             const snap = snaps[idx];
             if (!snap || !snap.data) throw new Error('Snapshot not found');
-            const data = this._decorate(snap.data);
-            data.tombstones = JSON.parse(JSON.stringify(this._tombs || GistMerge.emptyData().tombstones));
-            this._apply(data);
+            this.arm();
+            const pending = GistJournal.flatten(snap.data);
+            this._applying = true;
+            try { Storage.set('gist_pending_restore', pending); }
+            finally { this._applying = false; }
+            this._applyFolded(GistJournal.unflatten(pending));
+            this._flat = GistJournal.flatten(this._collect());
             this.schedulePush();
         },
         settingsHTML() {
@@ -3413,11 +3917,23 @@ function runCapture() {
                 '<span>' + esc(new Date(s.at).toLocaleString()) + ' · ' + esc(s.reason || 'snapshot') + '</span>' +
                 '<button type="button" class="tcm-btn tcm-gist-restore" data-idx="' + i + '">Restore</button></div>'
             ).join('') : '<div style="color:#666;">No local snapshots yet.</div>';
+            const conflicts = Storage.get('gist_open_conflicts', []) || [];
+            const conflictRows = conflicts.length ? (
+                '<div class="tcm-warn-box" style="margin-bottom:8px;line-height:1.45;">' +
+                '<strong>Conflicting edits.</strong> Both devices changed the same field without seeing each other. ' +
+                'The kept value is deterministic (later causal edit, otherwise higher Lamport counter, then device id). ' +
+                'The other values stay listed until you dismiss them.' +
+                conflicts.slice(0, 8).map(c => '<div style="margin-top:4px;"><code>' + esc(c.path) + '</code> kept ' +
+                    esc(c.kept == null ? 'deleted' : JSON.stringify(c.kept)).slice(0, 80) + '</div>').join('') +
+                '<button type="button" class="tcm-btn" id="tcm-gist-dismiss-conflicts" style="margin-top:6px;">Dismiss conflict list</button></div>'
+            ) : '';
             return '<div class="tcm-notice" style="font-size:11px;line-height:1.55;margin-bottom:8px;">' +
-                'Sync uses a <strong>private GitHub Gist</strong> (<code>tcm-data.json</code>). ' +
+                'Sync uses a <strong>private GitHub Gist</strong>, one journal file per device (<code>tcm-j-….json</code>). ' +
+                'This device never writes another device\'s journal. ' +
                 'Create a token with <strong>gist scope only</strong> (classic) or a fine-grained token with ' +
-                '<strong>Gists: Read and write</strong>. The token stays on this device and is never uploaded. ' +
-                'API keys are not synced.</div>' +
+                '<strong>Gists: Read and write</strong>. The token stays on this device. API keys are not synced. ' +
+                'Upgrade every device to this version before editing on more than one of them.</div>' +
+                conflictRows +
                 '<label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">GitHub token</label>' +
                 '<input class="tcm-input" id="tcm-gist-token" type="password" autocomplete="off" placeholder="ghp_… or github_pat_…"' +
                 ' value="' + esc(cfg.token) + '" style="width:100%;box-sizing:border-box;margin-bottom:8px;" />' +
@@ -3476,14 +3992,26 @@ function runCapture() {
                 try {
                     this.readForm();
                     if (!this.ready()) throw new Error('Token and Gist ID are required. Use Create gist if you do not have an id yet.');
-                    await this.syncNow('manual');
-                    if (btn) btn.textContent = '✓ Synced';
+                    const result = await this.syncNow('manual');
+                    if (result && result.held) {
+                        if (btn) { btn.disabled = false; btn.textContent = 'Waiting'; }
+                        alert('Sync is waiting until the company change finishes loading training history. It will not upload the cleared log.');
+                    } else if (btn) btn.textContent = '✓ Synced';
                     rerender();
                 } catch (e) {
                     if (btn) { btn.disabled = false; btn.textContent = '✗ Failed'; }
                     alert('Gist sync failed: ' + (e.message || e));
                     rerender();
                 }
+            });
+            tcmById('tcm-gist-dismiss-conflicts')?.addEventListener('click', () => {
+                const open = Storage.get('gist_open_conflicts', []) || [];
+                const prev = Storage.get('gist_conflicts_dismissed', []) || [];
+                const ids = open.map(c => c.id).filter(Boolean);
+                Storage.set('gist_conflicts_dismissed', prev.concat(ids));
+                Storage.set('gist_open_conflicts', []);
+                this._conflicts = [];
+                rerender();
             });
             document.querySelectorAll('.tcm-gist-restore').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -3499,78 +4027,194 @@ function runCapture() {
             });
         },
 
+        _backupOnce() {
+            if (Storage.get('gist_schema_backup_v2', null)) return;
+            this._applying = true;
+            try {
+                Storage.set('gist_schema_backup_v2', {
+                    at: Date.now(),
+                    note: 'Local copy taken before journal sync schema 2. Stays on this device.',
+                    data: this._collect(),
+                    stamps: Storage.get('gist_stamps', null),
+                    tombs: Storage.get('gist_tombstones', null)
+                });
+            } catch (e) {
+                console.warn('[TCM] schema backup failed', e);
+            } finally { this._applying = false; }
+        },
+        _legacyFlat(text) {
+            if (!text || !String(text).trim()) return null;
+            let bundle = null;
+            try { bundle = GistCodec.decodeBundle(text); } catch (e) { return null; }
+            const data = bundle && (bundle.data || bundle);
+            if (!data || typeof data !== 'object') return null;
+            const state = {};
+            const keys = ['trained_log', 'train_sales', 'paid_contracts', 'snapshots', 'rotation', 'schedule_config', 'schedule_overrides', 'google_sync_cfg', 'discord_cfg', 'overrides', 'settings'];
+            let any = false;
+            for (let i = 0; i < keys.length; i++) {
+                if (data[keys[i]] != null) { state[keys[i]] = data[keys[i]]; any = true; }
+            }
+            return any ? GistJournal.flatten(state) : null;
+        },
+        _filterConflicts(list) {
+            const dismissed = new Set(Storage.get('gist_conflicts_dismissed', []) || []);
+            return (list || []).filter(c => c && c.id && !dismissed.has(c.id));
+        },
+        _applyFolded(state) {
+            this._applying = true;
+            try {
+                const s = state || {};
+                Storage.set('trained_log', s.trained_log || {});
+                Storage.saveTrainSales(s.train_sales || []);
+                Storage.set('paid_contracts', s.paid_contracts || []);
+                const snaps = s.snapshots || [];
+                Storage.set('snapshots', snaps);
+                try { localStorage.setItem('TCM_snapshots_mirror', JSON.stringify(snaps)); } catch (e) {}
+                Storage.saveRotation(s.rotation || {});
+                if (typeof Storage.saveScheduleConfig === 'function') Storage.saveScheduleConfig(s.schedule_config || {});
+                if (typeof Storage.saveScheduleOverrides === 'function') Storage.saveScheduleOverrides(s.schedule_overrides || {});
+                Storage.set('google_sync_cfg', s.google_sync_cfg || {});
+                Storage.set('discord_cfg', s.discord_cfg || {});
+                Storage.set('overrides', s.overrides || {});
+                const local = Storage.getSettings() || {};
+                const incoming = s.settings || {};
+                const next = {};
+                for (const k of Object.keys(local)) {
+                    if (GistJournal.isSecretKey(k, local[k])) next[k] = local[k];
+                }
+                for (const k of Object.keys(incoming)) {
+                    if (GistJournal.isSecretKey(k, incoming[k])) continue;
+                    next[k] = incoming[k];
+                }
+                Storage.saveSettings(next);
+            } finally { this._applying = false; }
+        },
+        async _fetchAllFiles(cfg) {
+            const res = await this._request(cfg, 'GET', 'https://api.github.com/gists/' + encodeURIComponent(cfg.gistId));
+            const gist = res.data || {};
+            const files = gist.files || {};
+            const out = {};
+            const names = Object.keys(files);
+            for (let i = 0; i < names.length; i++) {
+                const file = files[names[i]];
+                if (!file) continue;
+                let content = file.content || '';
+                if (file.truncated && file.raw_url) {
+                    const raw = await this._request(cfg, 'GET', file.raw_url);
+                    content = typeof raw.data === 'string' ? raw.data : (raw.data ? JSON.stringify(raw.data) : '');
+                }
+                out[names[i]] = content;
+            }
+            this._lastUpdatedAt = gist.updated_at || '';
+            return out;
+        },
+        _patchFiles(cfg, map) {
+            const files = {};
+            const names = Object.keys(map || {});
+            for (let i = 0; i < names.length; i++) files[names[i]] = { content: map[names[i]] };
+            return this._request(cfg, 'PATCH', 'https://api.github.com/gists/' + encodeURIComponent(cfg.gistId), { files: files });
+        },
+        async _publish(cfg, seedFiles) {
+            const id = this._journal.deviceId;
+            const jName = GistJournal.journalName(id);
+            const bName = GistJournal.baseName(id);
+            let known = seedFiles || {};
+            let lastErr = null;
+            for (let attempt = 1; attempt <= 6; attempt++) {
+                if (this._holdPushes) return { held: true };
+                const upload = {};
+                upload[jName] = GistJournal.canonical(this._journal);
+                if (this._base && !known[bName]) upload[bName] = GistJournal.canon(this._base);
+                const observed = {};
+                for (const name of Object.keys(known)) {
+                    if (name.indexOf('tcm-j-') === 0 || name.indexOf('tcm-b-') === 0) observed[name] = known[name];
+                }
+                try { await this._patchFiles(cfg, upload); }
+                catch (e) {
+                    lastErr = e;
+                    await new Promise(r => setTimeout(r, 250 * attempt));
+                    continue;
+                }
+                let after;
+                try { after = await this._fetchAllFiles(cfg); }
+                catch (e) { lastErr = e; continue; }
+                const missing = GistJournal.missingPeers(observed, after).filter(n => n !== jName);
+                if (missing.length) {
+                    const repair = {};
+                    for (let i = 0; i < missing.length; i++) {
+                        if (observed[missing[i]]) repair[missing[i]] = observed[missing[i]];
+                    }
+                    if (Object.keys(repair).length) {
+                        try { await this._patchFiles(cfg, repair); } catch (e) { lastErr = e; }
+                        try { after = await this._fetchAllFiles(cfg); } catch (e) { lastErr = e; }
+                    }
+                }
+                known = after || known;
+                if (GistJournal.fileMatches(known[jName], this._journal)) return { ok: true, tries: attempt };
+            }
+            const err = lastErr || new Error('Gist did not retain this device journal');
+            this._fail(cfg, err);
+            throw err;
+        },
         async _doSync() {
             const cfg = this.getCfg();
             if (!cfg.token || !cfg.gistId) return { skipped: true };
             if (this._holdPushes) return { held: true };
             this.arm();
-            let attempt = 0;
-            while (attempt < 3) {
-                attempt++;
-                if (this._holdPushes) return { held: true };
-                let remoteInfo;
-                try { remoteInfo = await this._fetchGist(cfg); }
-                catch (e) { this._fail(cfg, e); throw e; }
-                if (this._holdPushes) return { held: true };
-                let localData = this._decorate(this._collect());
-                const remoteData = remoteInfo.bundle && (remoteInfo.bundle.data || remoteInfo.bundle);
-                const revisionChanged = !!(remoteInfo.updated_at && cfg.remoteUpdatedAt && remoteInfo.updated_at !== cfg.remoteUpdatedAt);
-                if (remoteData) {
-                    const merged = GistMerge.mergeData(localData, remoteData);
-                    const localChanged = GistMerge.stable(merged) !== GistMerge.stable(localData);
-                    if (revisionChanged && localChanged) this._saveSnapshot(this._collect(), 'pre-merge');
-                    if (localChanged || revisionChanged) {
-                        if (localChanged) this._apply(merged);
-                        localData = merged;
-                    }
-                    if (!revisionChanged && !localChanged && GistMerge.stable(localData) === GistMerge.stable(remoteData)) {
-                        this._markOk(cfg, remoteInfo.updated_at);
-                        return { unchanged: true };
-                    }
-                }
-                // No ETag (some TornPDA builds omit response headers): re-read once
-                // before writing. With an ETag, If-Match closes the same race.
-                if (!remoteInfo.etag) {
-                    try {
-                        const again = await this._fetchGist(cfg);
-                        if (again.updated_at && again.updated_at !== remoteInfo.updated_at && again.bundle) {
-                            const remote2 = again.bundle.data || again.bundle;
-                            const merged2 = GistMerge.mergeData(localData, remote2);
-                            if (GistMerge.stable(merged2) !== GistMerge.stable(localData)) {
-                                this._saveSnapshot(this._collect(), 'pre-merge');
-                                this._apply(merged2);
-                            }
-                            localData = merged2;
-                            remoteInfo = again;
-                        }
-                    } catch (e) { this._fail(cfg, e); throw e; }
-                }
-                if (this._holdPushes) return { held: true };
-                const bundle = {
-                    schema: 1,
-                    script: 'TCM-ALPHA',
-                    scriptVersion: TCM.VERSION,
-                    updatedAt: Date.now(),
-                    data: localData
+            this._backupOnce();
+            let files;
+            try { files = await this._fetchAllFiles(cfg); }
+            catch (e) { this._fail(cfg, e); throw e; }
+            if (this._holdPushes) return { held: true };
+            const parsed = GistJournal.parseGistFiles(files);
+            if (!this._base) {
+                const legacy = this._legacyFlat(files['tcm-data.json']);
+                this._base = {
+                    schema: 2, kind: 'base', deviceId: this._journal.deviceId,
+                    legacyHash: legacy ? GistJournal.hash(GistJournal.canon(legacy)) : 'empty',
+                    flat: legacy || {}
                 };
-                const content = GistCodec.encodeBundle(bundle);
-                if (remoteInfo.content === content) {
-                    this._markOk(cfg, remoteInfo.updated_at);
-                    return { unchanged: true };
-                }
-                try {
-                    const patched = await this._patch(cfg, content, remoteInfo.etag);
-                    this._markOk(cfg, (patched.data && patched.data.updated_at) || remoteInfo.updated_at);
-                    this._persistStampsFrom(localData);
-                    this._shadow = this._clone(this._collect());
-                    return { pushed: true };
-                } catch (e) {
-                    if (e && e.status === 412 && attempt < 3) continue;
-                    this._fail(cfg, e);
-                    throw e;
-                }
+                this._applying = true;
+                try { Storage.set('gist_base_v2', this._base); }
+                finally { this._applying = false; }
             }
-            return { pushed: false };
+            if (!Storage.get('gist_journal_migrated_v2', '')) {
+                const legacy = this._legacyFlat(files['tcm-data.json']);
+                const baseFlat = legacy || (this._base && this._base.flat) || {};
+                const localFlat = GistJournal.flatten(this._collect());
+                const raw = GistJournal.diff(baseFlat, localFlat);
+                if (raw.length) this._journal = GistJournal.append(this._journal, raw);
+                this._applying = true;
+                try { Storage.set('gist_journal_migrated_v2', '11.0.0'); }
+                finally { this._applying = false; }
+                this._saveJournal();
+            }
+            const pending = Storage.get('gist_pending_restore', null);
+            const remote = {
+                bases: parsed.bases.concat(this._base && !parsed.bases.some(b => b.legacyHash === this._base.legacyHash) ? [this._base] : []),
+                journals: parsed.journals,
+                files: files
+            };
+            let result = GistJournal.integrate(this._journal, remote, pending);
+            this._journal = result.journal;
+            if (pending) {
+                this._applying = true;
+                try { Storage.set('gist_pending_restore', null); }
+                finally { this._applying = false; }
+            }
+            this._saveJournal();
+            const before = GistJournal.flatten(this._collect());
+            if (GistJournal.canon(before) !== GistJournal.canon(result.flat)) this._saveSnapshot(this._collect(), 'pre-merge');
+            this._applyFolded(GistJournal.unflatten(result.flat));
+            this._flat = GistJournal.flatten(this._collect());
+            this._conflicts = this._filterConflicts(result.conflicts);
+            this._applying = true;
+            try { Storage.set('gist_open_conflicts', this._conflicts); }
+            finally { this._applying = false; }
+            if (this._holdPushes) return { held: true };
+            await this._publish(cfg, files);
+            this._markOk(cfg, this._lastUpdatedAt || '');
+            return { pushed: true, conflicts: this._conflicts.length };
         },
         _markOk(cfg, updatedAt) {
             cfg.lastSync = new Date().toISOString();
@@ -3798,7 +4442,9 @@ function runCapture() {
                 'X-GitHub-Api-Version': '2022-11-28'
             };
             if (body != null) hdrs['Content-Type'] = 'application/json';
-            if (etag) hdrs['If-Match'] = etag;
+            // Gist PATCH docs list 200/404/422 only, not 412. If-Match is not
+            // used: on other GitHub PATCH routes a stale If-Match has returned
+            // 412 and still applied the write. Journals are the safety mechanism.
             // Unique GET URL per call so TornPDA's 2s duplicate-GET filter never swallows
             // a fetch/verify pair; GitHub ignores the extra query parameter.
             if (method === 'GET') {
@@ -21582,6 +22228,8 @@ const trainNextBtn = tcmById('tcm-train-next-btn');
         window.__TCM_TEST_HOOKS.versionRank = _tcmVersionRank;
         window.__TCM_TEST_HOOKS.planTrainingLogPage = _tcmPlanTrainingLogPage;
         window.__TCM_TEST_HOOKS.trainingLogQuery = _tcmTrainingLogQuery;
+        window.__TCM_TEST_HOOKS.GistJournal = GistJournal;
+        window.__TCM_TEST_HOOKS.GistSync = GistSync;
     }
     tcmBoot();
 
