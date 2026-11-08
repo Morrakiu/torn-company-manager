@@ -187,7 +187,7 @@ async function main() {
         btn.click();
         await flush(1800);
         assert.strictEqual(counts(window).trains, 1);
-        assert.match(window.document.getElementById('tcm-cr-status').textContent, /Not counted/);
+        assert.match(window.document.getElementById('tcm-cr-status').textContent, /not counted/i);
         assert.strictEqual(counts(window).updates, 0, 'a timeout does not restore');
         const saved = store.TCM_v2_contract_stat_run;
         window.close();

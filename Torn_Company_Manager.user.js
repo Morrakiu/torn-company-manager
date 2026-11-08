@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM
 // @namespace    TCM
-// @version      11.1.1-beta
+// @version      11.1.2-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, training rotation, promotion projections, and recommendations. Company contract steps take one click per move, train, or restore.
 // @author       Morrakiu
@@ -388,7 +388,7 @@
 
 
     const TCM = {
-        VERSION: '11.1.1-beta',
+        VERSION: '11.1.2-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -17986,10 +17986,8 @@ Click any sell-price field to begin.
                 if (role === 'applySubmit') {
                     const v = _rw(parseFloat(_pp.querySelector('[data-r="manualPrice"]').value) || 0);
                     if (v > 0 && _pai) { _setVal(_pai, v); _refresh(); }
-                    const _sb = document.querySelector('span.btn button.torn-btn') ||
-                        Array.from(document.querySelectorAll('button.torn-btn'))
-                            .find(b => b.textContent.trim().toUpperCase() === 'SUBMIT');
-                    if (_sb) setTimeout(() => _sb.click(), 150);
+                    const _sum = _pp.querySelector('[data-r="summaryBox"]');
+                    if (_sum) _sum.textContent = 'Price filled. Press Torn\'s Submit yourself. TCM does not press it.';
                     return;
                 }
                 if (role === 'marginBtn') {
@@ -20579,9 +20577,7 @@ const wrap = document.createElement('div');
                     input.dispatchEvent(new Event('input',  { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                     input.focus();
-
-                    const _wBtn = wdFindWithdrawBtn(input);
-                    if (_wBtn) setTimeout(() => _wBtn.click(), 80);
+                    b.textContent = 'Filled — press Withdraw';
                 });
                 wrap.appendChild(b);
             });
@@ -20632,8 +20628,7 @@ const wrap = document.createElement('div');
                     depInput.dispatchEvent(new Event('input',  { bubbles: true }));
                     depInput.dispatchEvent(new Event('change', { bubbles: true }));
                     depInput.focus();
-                    const _dBtn = wdFindDepositBtn(depInput);
-                    if (_dBtn) setTimeout(() => _dBtn.click(), 80);
+                    db.textContent = 'Filled — press Deposit';
                 });
                 depWrap.appendChild(db);
             });
@@ -21146,7 +21141,8 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
                     stopAfterRestore: false,
                     error: '',
                     trainsLeft: Math.max(0, Number(trainsAvailable) || 0),
-                    blocked: plan.blocked || null
+                    blocked: plan.blocked || null,
+                    manual: 1
                 }
             };
         },
@@ -21181,6 +21177,17 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
             const next = this._cloneRun(run);
             const item = next.queue[next.index];
             event = event || {};
+            if (event.type === 'hold') {
+                next.error = event.message || 'Check Torn before another step. Nothing else was clicked.';
+                if (event.needsRestore && item) {
+                    next.phase = 'restore-set';
+                    next.stopAfterRestore = true;
+                } else {
+                    next.phase = 'blocked';
+                    next.active = true;
+                }
+                return next;
+            }
             if (event.type === 'fail') {
                 next.error = event.message || 'Stopped.';
                 if (item && item.switched && !item.restored) {
@@ -21274,6 +21281,13 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
             if (run.phase === 'train') return 'Train ' + name + ' (' + step + ')';
             if (run.phase === 'restore-set') return 'Restore ' + name + ' to ' + (item.origPosName || 'original');
             if (run.phase === 'restore-confirm') return 'Submit restore for ' + name;
+            if (run.phase === 'advance') {
+                const nxt = run.queue[run.index + 1];
+                if (!nxt) return 'Next contract step';
+                if (nxt.stat && nxt.trainPosName) return 'Move ' + (nxt.empName || 'employee') + ' to ' + nxt.trainPosName;
+                const nxtStep = ((nxt.trainsDone || 0) + 1) + '/' + (nxt.toTrain || 0);
+                return 'Train ' + (nxt.empName || 'employee') + ' (' + nxtStep + ')';
+            }
             if (run.phase === 'blocked') return 'Stopped';
             return 'Next contract step';
         },
@@ -21287,6 +21301,7 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
             if (!item) return 'Contract steps finished.';
             if (run.phase === 'blocked') return run.error || 'Stopped. Nothing else will be clicked.';
             const label = this.buttonLabel(run);
+            if (run.error) return run.error + ' Next click: ' + label + '.';
             return 'Next click: ' + label + '. One action only.';
         }
     };
@@ -21315,13 +21330,8 @@ let _srSwitchedIds = new Set();
 
         const _srBestPos = (stat) => {
             const _t = UI.state?.typeName; if (!_t || !stat) return null;
-            const _pos = CompanyData.positions(_t); if (!_pos) return null;
-            let _best = null, _bestG = -1;
-            for (const [name, data] of Object.entries(_pos)) {
-                if (data.primary !== stat) continue;
-                if (data.priGain > _bestG) { _bestG = data.priGain; _best = name; }
-            }
-            return _best;
+            const best = ContractStatRun.bestPosition(CompanyData.positions(_t), stat, '');
+            return best.ok ? best.name : null;
         };
         const _srFindOptIdx = (rankSel, posName) => {
             const _nl = PosNorm.normalize(posName).toLowerCase();
@@ -21332,17 +21342,76 @@ let _srSwitchedIds = new Set();
             }
             return -1;
         };
+        const _rowFor = (empId) => {
+            const sid = String(empId);
+            const direct = document.querySelector('li[data-user="' + sid + '"]')
+                || document.querySelector('[data-user="' + sid + '"]');
+            if (direct && direct.querySelector('select.employee-rank, select')) return direct;
+            const links = document.querySelectorAll('a[href*="ID=' + sid + '"], a[href*="id=' + sid + '"]');
+            for (let i = 0; i < links.length; i++) {
+                const row = links[i].closest('[data-user], li, tr') || links[i].parentElement;
+                if (row && row.querySelector('select.employee-rank, select')) return row;
+            }
+            return direct;
+        };
         const _srSetDrop = (empId, posValOrIdx, isIdx) => {
-            const _li = document.querySelector(`li[data-user="${empId}"]`);
-            const _rs = _li?.querySelector('select.employee-rank');
+            const _li = _rowFor(empId);
+            const _rs = _li?.querySelector('select.employee-rank, select');
             const _ud = _li?.querySelector('.update');
             if (!_rs) return false;
-            if (isIdx) { _rs.selectedIndex = posValOrIdx; } else { _rs.value = posValOrIdx; }
+            if (isIdx) { _rs.selectedIndex = posValOrIdx; } else { _rs.value = String(posValOrIdx); }
+            if (!isIdx && String(_rs.value) !== String(posValOrIdx)) return false;
             _rs.dispatchEvent(new Event('change', { bubbles: true }));
             const _lbl = _li.querySelector('.ui-selectmenu-status');
             if (_lbl) { const _o = _rs.options[_rs.selectedIndex]; if (_o) _lbl.textContent = _o.textContent.trim(); }
             if (_ud) { _ud.classList.remove('d-hidden', 't-hide'); _ud.classList.add('t-show'); }
             return true;
+        };
+        const _updateVisible = (row) => {
+            const d = row?.querySelector('.update');
+            return !!(d && d.classList.contains('t-show') && !d.classList.contains('d-hidden'));
+        };
+        const _waitUntil = (ms, pred) => new Promise(resolve => {
+            const t0 = Date.now();
+            const tick = () => {
+                let ok = false;
+                try { ok = !!pred(); } catch (e) { ok = false; }
+                if (ok || Date.now() - t0 >= ms) resolve(ok);
+                else setTimeout(tick, 100);
+            };
+            tick();
+        });
+        const _tornMsg = () => {
+            const el = document.getElementById('emp_message');
+            return (el && (el.innerText || el.textContent) || '').trim();
+        };
+        const _clearTornMsg = () => {
+            const el = document.getElementById('emp_message');
+            if (el) el.textContent = '';
+        };
+        const _msgIsErr = (text) => /error|fail|not enough|unable|cannot|can't|invalid|denied/i.test(text || '');
+        let _companyDispatch = null;
+        let _companyDocBound = false;
+        const _armCompanyClicks = () => {
+            if (_companyDocBound) return;
+            _companyDocBound = true;
+            document.addEventListener('click', (ev) => {
+                if (!_companyDispatch) return;
+                const btn = ev.target && ev.target.closest && ev.target.closest('button');
+                if (!btn || !btn.id || !btn.closest('#tcm-train-inject-bar')) return;
+                if (!_companyDispatch[btn.id]) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                _companyDispatch[btn.id]();
+            }, true);
+        };
+        const _restorePendingName = () => {
+            const run = Storage.get(ContractStatRun.KEY, null);
+            if (!run || !run.active || !run.manual) return '';
+            const item = ContractStatRun.current(run);
+            if (!item) return '';
+            if ((item.switched && !item.restored) || run.phase === 'switch-confirm' || run.phase === 'restore-set' || run.phase === 'restore-confirm') return item.empName || 'an employee';
+            return '';
         };
         const _srRefreshBtn = () => {
             const btn    = tcmById('tcm-sr-btn');
@@ -21355,7 +21424,6 @@ let _srSwitchedIds = new Set();
                 btn.textContent = '▶ Start Stat Rotation';
                 _ss('rgba(167,139,250,0.5)', '#a78bfa', 'rgba(167,139,250,0.12)');
                 if (cancel) cancel.style.display = 'none';
-                if (status) status.textContent = '';
                 return;
             }
             if (cancel) cancel.style.display = '';
@@ -21367,18 +21435,29 @@ let _srSwitchedIds = new Set();
             }
 const cur = _srQueue[_srIdx];
   const prog = `${_srIdx + 1}/${_srQueue.length}`;
-  if (_srState === 'switch') {
-      btn.textContent = `\u25B6 Phase 1 \u2014 Switch ${prog}: ${cur?.empName} \u2192 ${cur?.trainPosName}`;
+  if (_srState === 'switch' || _srState === 'switch-set') {
+      btn.textContent = `Move ${prog}: ${cur?.empName} → ${cur?.trainPosName}`;
       _ss('rgba(245,158,11,0.5)', '#f59e0b', 'rgba(245,158,11,0.12)');
-      if (status) status.textContent = `Switching all positions first (${prog})`;
+      if (status) status.textContent = 'Next click changes the dropdown only.';
+  } else if (_srState === 'switch-confirm') {
+      btn.textContent = `Submit move ${prog}: ${cur?.empName}`;
+      _ss('rgba(245,158,11,0.5)', '#f59e0b', 'rgba(245,158,11,0.12)');
+      if (status) status.textContent = 'Next click submits this move only.';
   } else if (_srState === 'train') {
-      btn.textContent = `\u25B6 Phase 2 \u2014 Train ${prog}: ${cur?.empName}`;
+      btn.textContent = `Train ${prog}: ${cur?.empName}`;
       _ss('rgba(126,184,255,0.5)', '#7eb8ff', 'rgba(126,184,255,0.12)');
-      if (status) status.textContent = `Training in switched positions (${prog})`;
-  } else if (_srState === 'restoring') {
-      btn.textContent = `\u25B6 Phase 3 \u2014 Restore ${prog}: ${cur?.empName}`;
+      if (status) status.textContent = 'Next click trains this employee only.';
+  } else if (_srState === 'restoring' || _srState === 'restore-set') {
+      btn.textContent = `Restore ${prog}: ${cur?.empName}`;
       _ss('rgba(96,165,250,0.5)', '#7eb8ff', 'rgba(96,165,250,0.12)');
-      if (status) status.textContent = `Restoring original positions (${prog})`;
+      if (status) status.textContent = 'Next click selects the saved position only.';
+  } else if (_srState === 'restore-confirm') {
+      btn.textContent = `Submit restore ${prog}: ${cur?.empName}`;
+      _ss('rgba(96,165,250,0.5)', '#7eb8ff', 'rgba(96,165,250,0.12)');
+      if (status) status.textContent = 'Next click submits this restore only.';
+  } else if (_srState === 'check') {
+      btn.textContent = 'Check Torn';
+      _ss('rgba(239,68,68,0.5)', '#ef4444', 'rgba(239,68,68,0.12)');
   }
 };
 
@@ -21472,15 +21551,24 @@ const cur = _srQueue[_srIdx];
             }
             const cur = _tnQueue[_tnIdx];
             const prog = `${_tnIdx + 1}/${_tnQueue.length}`;
-            if (_tnState === 'switch') {
-                btn.textContent = `▶ Phase 1 — Switch ${prog}: ${cur?.empName} → ${cur?.trainPosName}`;
+            if (_tnState === 'switch' || _tnState === 'switch-set') {
+                btn.textContent = `Move ${prog}: ${cur?.empName} → ${cur?.trainPosName}`;
+                _ss('rgba(245,158,11,0.5)', '#f59e0b', 'rgba(245,158,11,0.12)');
+            } else if (_tnState === 'switch-confirm') {
+                btn.textContent = `Submit move ${prog}: ${cur?.empName}`;
                 _ss('rgba(245,158,11,0.5)', '#f59e0b', 'rgba(245,158,11,0.12)');
             } else if (_tnState === 'train') {
-                btn.textContent = `▶ Train ${prog}: ${cur?.empName}`;
+                btn.textContent = `Train ${prog}: ${cur?.empName}`;
                 _ss('rgba(126,184,255,0.5)', '#7eb8ff', 'rgba(126,184,255,0.15)');
-            } else if (_tnState === 'restoring') {
-                btn.textContent = `▶ Phase 3 — Restore ${prog}: ${cur?.empName}`;
+            } else if (_tnState === 'restoring' || _tnState === 'restore-set') {
+                btn.textContent = `Restore ${prog}: ${cur?.empName}`;
                 _ss('rgba(96,165,250,0.5)', '#7eb8ff', 'rgba(96,165,250,0.12)');
+            } else if (_tnState === 'restore-confirm') {
+                btn.textContent = `Submit restore ${prog}: ${cur?.empName}`;
+                _ss('rgba(96,165,250,0.5)', '#7eb8ff', 'rgba(96,165,250,0.12)');
+            } else if (_tnState === 'check') {
+                btn.textContent = 'Check Torn';
+                _ss('rgba(239,68,68,0.5)', '#ef4444', 'rgba(239,68,68,0.12)');
             }
         };
 
@@ -21741,137 +21829,174 @@ const _tnStatSel = document.createElement('select');
                     _tcmUpdateModeBtns();
                     setTimeout(tryInject, 50);
                 });
-_btnNext.addEventListener('click', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    if (!_btnNext || _btnNext.disabled) return;
-
-    if (_tnState === 'idle' || _tnState === 'done') {
-        const _tnStat = _tnStatSel?.value || '';
-        const _tnBestPos = _tnStat ? _srBestPos(_tnStat) : null;
-        if (_tnStat && !_tnBestPos) {
-            if (_feedbackSpan) { _feedbackSpan.textContent = `⚠ No position with ${_tnStat.toUpperCase()} as primary found.`; _feedbackSpan.style.color = '#ef4444'; }
-            return;
-        }
-        const _tnScheduled = _getScheduledIdsForMode();
-        _tnQueue = [];
-        const _tnSeen = new Set();
-        _tnScheduled.forEach(eid => {
-            if (_tnSeen.has(eid) || _inFlightTrains.has(String(eid))) return;
-            _tnSeen.add(eid);
-            const _tnLi = document.querySelector(`li[data-user="${eid}"]`);
-            const _tnRs = _tnLi?.querySelector('select.employee-rank');
-            if (!_tnRs) return;
-            _tnQueue.push({ empId: eid, empName: UI.state?.employees?.[eid]?.name || `#${eid}`, origPosVal: _tnRs.value, trainPosName: _tnBestPos });
-        });
-        if (!_tnQueue.length) {
-            if (_feedbackSpan) { _feedbackSpan.textContent = '⚠ No employees scheduled today in current mode.'; _feedbackSpan.style.color = '#ef4444'; }
-            return;
-        }
-        _tnSwitchedIds.clear();
-        _tnIdx = 0;
-        _tnState = _tnBestPos ? 'switch' : 'train';
-        _tnRefreshBtn();
-        return;
-    }
-
-    const cur = _tnQueue[_tnIdx];
-    if (!cur) { _tnState = 'done'; _tnRefreshBtn(); return; }
-    const _tLi   = document.querySelector(`li[data-user="${cur.empId}"]`);
-    const _tRs   = _tLi?.querySelector('select.employee-rank');
-    const _tTl   = _tLi?.querySelector('a.train-action[href*="trainemp"]') || _tLi?.querySelector('a[href*="trainemp"]');
-
-    if (_tnState === 'switch') {
-        if (!_tRs) { _tnIdx++; if (_tnIdx < _tnQueue.length) { _tnState = 'switch'; } else { _tnIdx = 0; _tnState = 'train'; } _tnRefreshBtn(); return; }
-        const _tIdx = _srFindOptIdx(_tRs, cur.trainPosName);
-        if (_tIdx === -1) { _tnIdx++; if (_tnIdx < _tnQueue.length) { _tnState = 'switch'; } else { _tnIdx = 0; _tnState = 'train'; } _tnRefreshBtn(); return; }
-        cur.origPosVal = cur.origPosVal || _tRs.value;
-        _srSetDrop(cur.empId, _tIdx, true);
-        _tnSwitchedIds.add(cur.empId);
-        setTimeout(() => {
-            const _tUd2 = _tLi?.querySelector('.update');
-            const _tUb2 = _tUd2?.querySelector('button');
-            const _tUvis2 = _tUd2 && _tUd2.classList.contains('t-show') && !_tUd2.classList.contains('d-hidden');
-            if (_tUvis2 && _tUb2) _tUb2.click();
-            _tnIdx++;
-            if (_tnIdx < _tnQueue.length) { _tnState = 'switch'; }
-            else { _tnIdx = 0; _tnState = 'train'; }
-            _tnRefreshBtn();
-        }, 400);
-        return;
-    }
-
-    if (_tnState === 'train') {
-        if (!_tTl) {
-            if (_feedbackSpan) { _feedbackSpan.textContent = '⚠ Train link not found for ' + cur.empName + '.'; _feedbackSpan.style.color = '#ef4444'; }
-            _tnIdx++;
-            if (_tnIdx < _tnQueue.length) { _tnState = 'train'; }
-            else { _tnIdx = 0; _tnState = _tnSwitchedIds.size ? 'restoring' : 'done'; }
-            _tnRefreshBtn();
-            return;
-        }
-        const _tTrainsAvail = UI.state?.detailed?.trains_available ?? 0;
-        if (_tTrainsAvail <= 0) {
-            if (_feedbackSpan) { _feedbackSpan.textContent = '⚠ No trains left today.'; _feedbackSpan.style.color = '#ef4444'; }
-            _tnIdx = 0;
-            _tnState = _tnSwitchedIds.size ? 'restoring' : 'done';
-            _tnRefreshBtn();
-            return;
-        }
-        _tTl.click();
-        Storage.logTrained(cur.empId, cur.empName, Math.floor(Date.now() / 1000), null);
-        if (UI.state?.detailed && UI.state.detailed.trains_available != null) {
-            UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
-        }
-        _tnIdx++;
-        const _tBudgetLeft = UI.state?.detailed?.trains_available ?? 0;
-        if (_tnIdx < _tnQueue.length && _tBudgetLeft > 0) { _tnState = 'train'; }
-        else { _tnIdx = 0; _tnState = _tnSwitchedIds.size ? 'restoring' : 'done'; }
-        _tnRefreshBtn();
-        return;
-    }
-
-    if (_tnState === 'restoring') {
-        if (!cur.origPosVal || !_tnSwitchedIds.has(cur.empId)) {
-            _tnIdx++;
-            _tnState = _tnIdx < _tnQueue.length ? 'restoring' : 'done';
-            _tnRefreshBtn();
-            return;
-        }
-        if (!_tRs) { if (_feedbackSpan) _feedbackSpan.textContent = '⚠ Dropdown not found — reload page.'; return; }
-        _srSetDrop(cur.empId, cur.origPosVal, false);
-        setTimeout(() => {
-            const _tUd3 = _tLi?.querySelector('.update');
-            const _tUb3 = _tUd3?.querySelector('button');
-            const _tUvis3 = _tUd3 && _tUd3.classList.contains('t-show') && !_tUd3.classList.contains('d-hidden');
-            if (_tUvis3 && _tUb3) _tUb3.click();
-            _tnSwitchedIds.delete(cur.empId);
-            _tnIdx++;
-            _tnState = _tnIdx < _tnQueue.length ? 'restoring' : 'done';
-            _tnRefreshBtn();
-        }, 400);
-        return;
-    }
-});
-
-_tnCancelBtn.addEventListener('click', () => {
-    const _tnToRestore = [..._tnSwitchedIds];
-    _tnToRestore.forEach((_eid, _ri) => {
-        const _qEntry = _tnQueue.find(q => q.empId === _eid);
-        if (!_qEntry?.origPosVal) return;
-        setTimeout(() => {
-            _srSetDrop(_eid, _qEntry.origPosVal, false);
-            setTimeout(() => {
-                document.querySelector(`li[data-user="${_eid}"] .update button`)?.click();
-            }, 400);
-        }, _ri * 900);
-    });
-    if (_feedbackSpan) {
-        _feedbackSpan.textContent = _tnToRestore.length ? `Restoring ${_tnToRestore.length} position(s)…` : '';
-        _feedbackSpan.style.color = '#7eb8ff';
-    }
-    _tnSwitchedIds.clear();
-    _tnQueue = []; _tnIdx = 0; _tnState = 'idle'; _tnRefreshBtn();
-});
+                let _tnBusy = false;
+                let _tnStopAfter = false;
+                let _srBusy = false;
+                let _srStopAfter = false;
+                let _psBusy = false;
+                let _psPhase = 'ready';
+                const _say = (el, text, color) => { if (!el) return; el.textContent = text || ''; el.style.color = color || '#f59e0b'; };
+                async function _oneQueueClick(ctx) {
+                    const feedback = ctx.feedback();
+                    if (ctx.busy()) { _say(feedback, 'Finish the current click. Extra clicks are ignored.', '#f59e0b'); return; }
+                    const pending = _restorePendingName();
+                    if (pending) { _say(feedback, pending + ' still needs a contract restore. This button will not move or train anyone.', '#ef4444'); return; }
+                    if (_crBusy || _tnBusy || _srBusy || _psBusy) { _say(feedback, 'Another company step is still finishing.', '#f59e0b'); return; }
+                    ctx.setBusy(true);
+                    try {
+                        if (ctx.state() === 'check') { _say(feedback, 'Check Torn before another step. This button will not send that request again.', '#ef4444'); return; }
+                        if (ctx.state() === 'idle' || ctx.state() === 'done') {
+                            const built = ctx.build();
+                            if (!built.ok) _say(feedback, built.message, '#ef4444');
+                            return;
+                        }
+                        const cur = ctx.current();
+                        if (!cur) { ctx.setState('done'); return; }
+                        const row = _rowFor(cur.empId);
+                        const rank = row?.querySelector('select.employee-rank, select');
+                        const link = row?.querySelector('a.train-action[href*="trainemp"]') || row?.querySelector('a[href*="trainemp"]');
+                        const st = ctx.state();
+                        if (st === 'switch' || st === 'switch-set') {
+                            if (!rank) { _say(feedback, 'Position dropdown is not on the page for ' + cur.empName + '.', '#ef4444'); return; }
+                            const idx = _srFindOptIdx(rank, cur.trainPosName);
+                            if (idx === -1) { _say(feedback, '"' + cur.trainPosName + '" is not in the dropdown.', '#ef4444'); return; }
+                            if (idx === rank.selectedIndex) { ctx.advanceAfterSwitch(false); return; }
+                            cur.origPosVal = rank.value || cur.origPosVal;
+                            if (!_srSetDrop(cur.empId, idx, true)) { _say(feedback, 'Could not change the dropdown.', '#ef4444'); return; }
+                            ctx.switched().add(String(cur.empId));
+                            ctx.setState('switch-confirm');
+                            return;
+                        }
+                        if (st === 'switch-confirm' || st === 'restore-confirm') {
+                            const btn = row?.querySelector('.update button');
+                            if (!_updateVisible(row) || !btn) {
+                                ctx.setState('check');
+                                _say(feedback, 'Update is not visible, so nothing was sent for ' + cur.empName + '. Check Torn. This button will not try again.', '#ef4444');
+                                return;
+                            }
+                            const before = _tornMsg();
+                            _clearTornMsg();
+                            btn.click();
+                            const saw = await _waitUntil(1500, () => !_updateVisible(_rowFor(cur.empId)) || (_tornMsg() && _tornMsg() !== before));
+                            const msg = _tornMsg();
+                            if (!saw || _updateVisible(_rowFor(cur.empId)) || (msg && msg !== before && _msgIsErr(msg))) {
+                                ctx.setState('check');
+                                _say(feedback, (msg && msg !== before ? msg + ' ' : '') + 'The position update was not confirmed for ' + cur.empName + '. It was not retried.', '#ef4444');
+                                return;
+                            }
+                            if (st === 'switch-confirm') { ctx.switched().add(String(cur.empId)); ctx.afterConfirmedMove(); }
+                            else { ctx.switched().delete(String(cur.empId)); ctx.afterConfirmedRestore(); }
+                            return;
+                        }
+                        if (st === 'train') {
+                            if (!link || link.classList.contains('disabled')) { _say(feedback, 'Train control is not available for ' + cur.empName + '.', '#ef4444'); return; }
+                            if ((UI.state?.detailed?.trains_available ?? 0) <= 0) {
+                                _say(feedback, 'No company trains are available. Nobody was trained.', '#ef4444');
+                                ctx.setIdx(0);
+                                ctx.setState(ctx.switched().size ? 'restore-set' : 'done');
+                                return;
+                            }
+                            const before = _tornMsg();
+                            _clearTornMsg();
+                            link.click();
+                            const saw = await _waitUntil(1600, () => { const m = _tornMsg(); return m.length > 0 && m !== before; });
+                            const msg = _tornMsg();
+                            if (!saw || _msgIsErr(msg)) {
+                                ctx.setState('check');
+                                _say(feedback, !saw ? ('No new confirmation for ' + cur.empName + '. The train was not counted and will not be sent again. Check Torn.') : msg, '#ef4444');
+                                return;
+                            }
+                            Storage.logTrained(cur.empId, cur.empName, Math.floor(Date.now() / 1000), null);
+                            if (UI.state?.detailed && UI.state.detailed.trains_available != null) UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
+                            ctx.afterTrain();
+                            return;
+                        }
+                        if (st === 'restoring' || st === 'restore-set') {
+                            if (!cur.origPosVal || !ctx.switched().has(String(cur.empId))) { ctx.skipRestore(); return; }
+                            if (!rank) { _say(feedback, 'Position dropdown is not on the page.', '#ef4444'); return; }
+                            if (String(rank.value) !== String(cur.origPosVal) && !_srSetDrop(cur.empId, cur.origPosVal, false)) {
+                                _say(feedback, 'Could not select the saved position.', '#ef4444');
+                                return;
+                            }
+                            ctx.setState('restore-confirm');
+                        }
+                    } finally {
+                        ctx.setBusy(false);
+                        ctx.refresh();
+                    }
+                }
+                const _tnCtx = () => ({
+                    busy: () => _tnBusy, setBusy: (v) => { _tnBusy = v; },
+                    state: () => _tnState, setState: (v) => { _tnState = v; },
+                    setIdx: (v) => { _tnIdx = v; }, current: () => _tnQueue[_tnIdx],
+                    switched: () => _tnSwitchedIds, feedback: () => tcmById('tcm-ti-feedback'), refresh: _tnRefreshBtn,
+                    build: () => {
+                        const stat = tcmById('tcm-tn-stat')?.value || '';
+                        const best = stat ? _srBestPos(stat) : null;
+                        if (stat && !best) return { ok: false, message: 'No position with a ' + stat.toUpperCase() + ' training gain.' };
+                        const seen = new Set();
+                        _tnQueue = [];
+                        _getScheduledIdsForMode().forEach(eid => {
+                            if (seen.has(eid)) return;
+                            seen.add(eid);
+                            const rank = _rowFor(eid)?.querySelector('select.employee-rank, select');
+                            if (!rank) return;
+                            _tnQueue.push({ empId: eid, empName: UI.state?.employees?.[eid]?.name || ('#' + eid), origPosVal: rank.value, trainPosName: best });
+                        });
+                        if (!_tnQueue.length) return { ok: false, message: 'No employees scheduled today in the current mode.' };
+                        _tnSwitchedIds.clear();
+                        _tnIdx = 0;
+                        _tnStopAfter = false;
+                        _tnState = best ? 'switch-set' : 'train';
+                        return { ok: true };
+                    },
+                    advanceAfterSwitch: () => {
+                        _tnIdx++;
+                        if (_tnIdx < _tnQueue.length) _tnState = 'switch-set';
+                        else { _tnIdx = 0; _tnState = 'train'; }
+                    },
+                    afterConfirmedMove: () => {
+                        _tnIdx++;
+                        if (_tnStopAfter) {
+                            _tnIdx = Math.max(0, _tnQueue.findIndex(q => _tnSwitchedIds.has(String(q.empId))));
+                            _tnState = 'restore-set';
+                        } else if (_tnIdx < _tnQueue.length) _tnState = 'switch-set';
+                        else { _tnIdx = 0; _tnState = 'train'; }
+                    },
+                    afterTrain: () => {
+                        _tnIdx++;
+                        const left = UI.state?.detailed?.trains_available ?? 0;
+                        if (!_tnStopAfter && _tnIdx < _tnQueue.length && left > 0) _tnState = 'train';
+                        else { _tnIdx = Math.max(0, _tnQueue.findIndex(q => _tnSwitchedIds.has(String(q.empId)))); _tnState = _tnSwitchedIds.size ? 'restore-set' : 'done'; }
+                    },
+                    afterConfirmedRestore: () => {
+                        _tnIdx++;
+                        const next = _tnQueue.findIndex((q, i) => i >= _tnIdx && _tnSwitchedIds.has(String(q.empId)));
+                        if (next >= 0) { _tnIdx = next; _tnState = 'restore-set'; }
+                        else _tnState = 'done';
+                    },
+                    skipRestore: () => {
+                        _tnIdx++;
+                        const next = _tnQueue.findIndex((q, i) => i >= _tnIdx && _tnSwitchedIds.has(String(q.empId)));
+                        if (next >= 0) { _tnIdx = next; _tnState = 'restore-set'; }
+                        else _tnState = 'done';
+                    }
+                });
+                const _tnClick = () => { _oneQueueClick(_tnCtx()); };
+                const _tnCancel = () => {
+                    if (_tnBusy) { _say(tcmById('tcm-ti-feedback'), 'This click is still finishing. Cancel does not queue another action.', '#f59e0b'); return; }
+                    if (_tnSwitchedIds.size) {
+                        _tnStopAfter = true;
+                        const i = _tnQueue.findIndex(q => _tnSwitchedIds.has(String(q.empId)));
+                        _tnIdx = i < 0 ? 0 : i;
+                        _tnState = 'restore-set';
+                        _say(tcmById('tcm-ti-feedback'), 'Press the button to restore. Cancel does not move anyone.', '#f59e0b');
+                        _tnRefreshBtn();
+                        return;
+                    }
+                    _tnQueue = []; _tnIdx = 0; _tnState = 'idle'; _tnStopAfter = false;
+                    _tnRefreshBtn();
+                };
 
                 const _hlOn0 = !_tcmGmGet('TCM_highlights_hidden', false);
                 const _hlBtn = document.createElement('button');
@@ -21948,155 +22073,111 @@ _barInner.appendChild(_btnPri);
                 const _crStatusEl = _barInner.querySelector('#tcm-cr-status');
 
 
-                bar.querySelector('#tcm-sr-btn')?.addEventListener('click', () => {
-                    const _srBtnEl = tcmById('tcm-sr-btn');
-                    const _srStEl  = tcmById('tcm-sr-status');
-                    if (!_srBtnEl) return;
-
-
-                    if (_srState === 'idle' || _srState === 'done') {
-                        const stat = tcmById('tcm-sr-stat')?.value;
-                        if (!stat) { if (_srStEl) { _srStEl.textContent = '\u26A0 Select a stat first.'; _srStEl.style.color = '#ef4444'; } return; }
-                        const bestPos = _srBestPos(stat);
-                        if (!bestPos) { if (_srStEl) { _srStEl.textContent = `\u26A0 No position with ${stat.toUpperCase()} as primary found.`; _srStEl.style.color = '#ef4444'; } return; }
-
-const _srAppState = UI.state;
-                        const _srEmps2 = _srAppState?.employees || {};
-                        const _srScheduledIds2 = _getScheduledIdsForMode();
-
+                const _srClick = () => _oneQueueClick({
+                    busy: () => _srBusy, setBusy: (v) => { _srBusy = v; },
+                    state: () => _srState, setState: (v) => { _srState = v; },
+                    setIdx: (v) => { _srIdx = v; }, current: () => _srQueue[_srIdx],
+                    switched: () => _srSwitchedIds, feedback: () => tcmById('tcm-sr-status'), refresh: _srRefreshBtn,
+                    build: () => {
+                        const stat = tcmById('tcm-sr-stat')?.value || '';
+                        if (!stat) return { ok: false, message: 'Select a stat first.' };
+                        const best = _srBestPos(stat);
+                        if (!best) return { ok: false, message: 'No position with a ' + stat.toUpperCase() + ' training gain.' };
+                        const emps = UI.state?.employees || {};
+                        const seen = new Set();
                         _srQueue = [];
-                        const _srSeen2 = new Set();
-                        _srScheduledIds2.forEach(eid => {
-                            if (_srSeen2.has(eid)) return;
-                            _srSeen2.add(eid);
-                            const eli = document.querySelector(`li[data-user="${eid}"]`);
-                            const rsel = eli?.querySelector('select.employee-rank');
-                            if (!rsel) return;
-                            _srQueue.push({ empId: eid, empName: _srEmps2[eid]?.name || `#${eid}`, origPosVal: rsel.value, trainPosName: bestPos });
+                        _getScheduledIdsForMode().forEach(eid => {
+                            if (seen.has(eid)) return;
+                            seen.add(eid);
+                            const rank = _rowFor(eid)?.querySelector('select.employee-rank, select');
+                            if (!rank) return;
+                            _srQueue.push({ empId: eid, empName: emps[eid]?.name || ('#' + eid), origPosVal: rank.value, trainPosName: best });
                         });
-                        if (!_srQueue.length) { if (_srStEl) { _srStEl.textContent = '\u26A0 No employees scheduled today in current mode.'; _srStEl.style.color = '#ef4444'; } return; }
+                        if (!_srQueue.length) return { ok: false, message: 'No employees scheduled today in the current mode.' };
                         _srSwitchedIds.clear();
-                        _srIdx = 0; _srState = 'switch'; _srRefreshBtn(); return;
+                        _srIdx = 0;
+                        _srStopAfter = false;
+                        _srState = 'switch-set';
+                        return { ok: true };
+                    },
+                    advanceAfterSwitch: () => {
+                        _srIdx++;
+                        if (_srIdx < _srQueue.length) _srState = 'switch-set';
+                        else { _srIdx = 0; _srState = 'train'; }
+                    },
+                    afterConfirmedMove: () => {
+                        _srIdx++;
+                        if (_srStopAfter) {
+                            _srIdx = Math.max(0, _srQueue.findIndex(q => _srSwitchedIds.has(String(q.empId))));
+                            _srState = 'restore-set';
+                        } else if (_srIdx < _srQueue.length) _srState = 'switch-set';
+                        else { _srIdx = 0; _srState = 'train'; }
+                    },
+                    afterTrain: () => {
+                        _srIdx++;
+                        const left = UI.state?.detailed?.trains_available ?? 0;
+                        if (!_srStopAfter && _srIdx < _srQueue.length && left > 0) _srState = 'train';
+                        else { _srIdx = Math.max(0, _srQueue.findIndex(q => _srSwitchedIds.has(String(q.empId)))); _srState = _srSwitchedIds.size ? 'restore-set' : 'done'; }
+                    },
+                    afterConfirmedRestore: () => {
+                        _srIdx++;
+                        const next = _srQueue.findIndex((q, i) => i >= _srIdx && _srSwitchedIds.has(String(q.empId)));
+                        if (next >= 0) { _srIdx = next; _srState = 'restore-set'; }
+                        else _srState = 'done';
+                    },
+                    skipRestore: () => {
+                        _srIdx++;
+                        const next = _srQueue.findIndex((q, i) => i >= _srIdx && _srSwitchedIds.has(String(q.empId)));
+                        if (next >= 0) { _srIdx = next; _srState = 'restore-set'; }
+                        else _srState = 'done';
                     }
-
-                    const cur = _srQueue[_srIdx];
-                    if (!cur) { _srState = 'done'; _srRefreshBtn(); return; }
-                    const _sLi   = document.querySelector(`li[data-user="${cur.empId}"]`);
-                    const _sRs   = _sLi?.querySelector('select.employee-rank');
-                    const _sUd   = _sLi?.querySelector('.update');
-                    const _sUb   = _sUd?.querySelector('button');
-                    const _sTl   = _sLi?.querySelector('a.train-action[href*="trainemp"]') || _sLi?.querySelector('a[href*="trainemp"]');
-                    const _sUvis = _sUd && _sUd.classList.contains('t-show') && !_sUd.classList.contains('d-hidden');
-
-                    if (_srState === 'switch') {
-                        if (!_sRs) { if (_srStEl) _srStEl.textContent = '\u26A0 Dropdown not found — reload page.'; return; }
-                        const idx = _srFindOptIdx(_sRs, cur.trainPosName);
-                        if (idx === -1) { if (_srStEl) { _srStEl.textContent = `\u26A0 "${cur.trainPosName}" not in dropdown.`; _srStEl.style.color = '#ef4444'; } return; }
-                        cur.origPosVal = cur.origPosVal || _sRs.value;
-                        _srSetDrop(cur.empId, idx, true);
-                        _srSwitchedIds.add(cur.empId);
-if (_srBtnEl) { _srBtnEl.disabled = true; _srBtnEl.textContent = `Switching ${_srIdx + 1}/${_srQueue.length}: ${cur.empName}…`; }
-  if (_srStEl) { _srStEl.textContent = `Phase 1: Moving ${cur.empName} to ${cur.trainPosName}…`; _srStEl.style.color = '#f59e0b'; }
-  setTimeout(() => {
-      const _sUd2 = _sLi?.querySelector('.update');
-      const _sUb2 = _sUd2?.querySelector('button');
-      const _sUvis2 = _sUd2 && _sUd2.classList.contains('t-show') && !_sUd2.classList.contains('d-hidden');
-      if (_sUvis2 && _sUb2) _sUb2.click();
-      _srIdx++;
-      if (_srIdx < _srQueue.length) {
-          _srState = 'switch';
-      } else {
-          _srIdx = 0;
-          _srState = 'train';
-      }
-      _srRefreshBtn();
-  }, 400);
-  return;
-}
-if (_srState === 'train') {
-  if (!_sTl) { if (_srStEl) { _srStEl.textContent = '\u26A0 Train link not found.'; _srStEl.style.color = '#ef4444'; } return; }
-  const _srTrainsAvail = UI.state?.detailed?.trains_available ?? 0;
-  if (_srTrainsAvail <= 0) {
-      if (_srStEl) { _srStEl.textContent = '\u26A0 No trains left — switching to restore phase.'; _srStEl.style.color = '#f59e0b'; }
-      _srIdx = 0; _srState = 'restoring'; _srRefreshBtn(); return;
-  }
-  _sTl.click();
-  Storage.logTrained(cur.empId, cur.empName, Math.floor(Date.now() / 1000), null);
-  if (UI.state?.detailed?.trains_available != null)
-      UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
-  _srIdx++;
-  const _srBudgetLeft = UI.state?.detailed?.trains_available ?? 0;
-  if (_srIdx < _srQueue.length && _srBudgetLeft > 0) {
-      _srState = 'train';
-  } else {
-      _srIdx = 0;
-      _srState = 'restoring';
-  }
-  _srRefreshBtn();
-  return;
-}
-if (_srState === 'restoring') {
-                        if (!cur.origPosVal || !_srSwitchedIds.has(cur.empId)) {
-                            _srIdx++;
-                            _srState = _srIdx < _srQueue.length ? 'restoring' : 'done';
-                            _srRefreshBtn();
-                            return;
-                        }
-                        if (!_sRs) { if (_srStEl) _srStEl.textContent = '\u26A0 Dropdown not found — reload page.'; return; }
-                        _srSetDrop(cur.empId, cur.origPosVal, false);
-                        if (_srBtnEl) { _srBtnEl.disabled = true; _srBtnEl.textContent = `Restoring: ${cur.empName}…`; }
-                        if (_srStEl) { _srStEl.textContent = `Restoring ${cur.empName} to original position…`; _srStEl.style.color = '#7eb8ff'; }
-                        setTimeout(() => {
-                            const _sUd3 = _sLi?.querySelector('.update');
-                            const _sUb3 = _sUd3?.querySelector('button');
-                            const _sUvis3 = _sUd3 && _sUd3.classList.contains('t-show') && !_sUd3.classList.contains('d-hidden');
-                            if (_sUvis3 && _sUb3) _sUb3.click();
-                            _srSwitchedIds.delete(cur.empId);
-                            _srIdx++;
-                            _srState = _srIdx < _srQueue.length ? 'restoring' : 'done';
-                            _srRefreshBtn();
-                        }, 400);
+                });
+                const _srCancel = () => {
+                    if (_srBusy) { _say(tcmById('tcm-sr-status'), 'This click is still finishing. Cancel does not queue another action.', '#f59e0b'); return; }
+                    if (_srSwitchedIds.size) {
+                        _srStopAfter = true;
+                        const i = _srQueue.findIndex(q => _srSwitchedIds.has(String(q.empId)));
+                        _srIdx = i < 0 ? 0 : i;
+                        _srState = 'restore-set';
+                        _say(tcmById('tcm-sr-status'), 'Press the button to restore. Cancel does not move anyone.', '#f59e0b');
+                        _srRefreshBtn();
                         return;
                     }
-                });
+                    _srQueue = []; _srIdx = 0; _srState = 'idle'; _srStopAfter = false;
+                    _srRefreshBtn();
+                };
 
-bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
 
-                    const _srStElCancel = tcmById('tcm-sr-status');
-                    const _srToRestore  = [..._srSwitchedIds];
-                    _srToRestore.forEach((_eid, _ri) => {
-                        const _qEntry = _srQueue.find(q => q.empId === _eid);
-                        if (!_qEntry?.origPosVal) return;
-                        setTimeout(() => {
-                            _srSetDrop(_eid, _qEntry.origPosVal, false);
-                            setTimeout(() => {
-                                document.querySelector(`li[data-user="${_eid}"] .update button`)?.click();
-                            }, 400);
-                        }, _ri * 900);
-                    });
-                    if (_srStElCancel) {
-                        _srStElCancel.textContent = _srToRestore.length ? `Restoring ${_srToRestore.length} position(s)…` : '';
-                        _srStElCancel.style.color = '#7eb8ff';
+                const _crLoad = () => {
+                    const run = Storage.get(ContractStatRun.KEY, null);
+                    if (!run || !run.active || run.manual) return run;
+                    const item = ContractStatRun.current(run);
+                    const away = item && ((item.switched && !item.restored) || run.phase === 'switch-set' || run.phase === 'switch-confirm' || run.phase === 'restore-set' || run.phase === 'restore-confirm');
+                    if (away) {
+                        const migrated = ContractStatRun._cloneRun(run);
+                        migrated.manual = 1;
+                        migrated.phase = 'restore-set';
+                        migrated.stopAfterRestore = true;
+                        migrated.error = 'Saved from an older automatic contract run. Nothing ran on load. The next press only restores ' + (item.empName || 'the employee') + '.';
+                        Storage.set(ContractStatRun.KEY, migrated);
+                        return migrated;
                     }
-                    _srSwitchedIds.clear();
-                    _srQueue = []; _srIdx = 0; _srState = 'idle'; _srRefreshBtn();
-                });
-
-
-                const _crLoad = () => Storage.get(ContractStatRun.KEY, null);
+                    Storage.set(ContractStatRun.KEY, null);
+                    return null;
+                };
                 const _crSave = (run) => {
                     if (!run || !run.active) Storage.set(ContractStatRun.KEY, null);
                     else Storage.set(ContractStatRun.KEY, run);
                 };
                 const _crStatus = (text, color) => {
-                    const el = (_crStatusEl && _crStatusEl.isConnected) ? _crStatusEl : bar.querySelector('#tcm-cr-status');
+                    const el = tcmById('tcm-cr-status') || _crStatusEl;
                     if (!el) return;
                     el.textContent = text || '';
                     el.style.color = color || '#9ca3af';
                 };
                 const _crButtons = () => {
-                    const start = (_crStartBtn && _crStartBtn.isConnected) ? _crStartBtn : bar.querySelector('#tcm-cr-start');
-                    const cancel = (_crCancelBtn && _crCancelBtn.isConnected) ? _crCancelBtn : bar.querySelector('#tcm-cr-cancel');
+                    const start = tcmById('tcm-cr-start') || _crStartBtn;
+                    const cancel = tcmById('tcm-cr-cancel') || _crCancelBtn;
                     const run = _crLoad();
                     if (start) {
                         start.disabled = !!_crBusy;
@@ -22199,15 +22280,19 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     }
                     if (action.type === 'switch-confirm' || action.type === 'restore-confirm') {
                         const btn = _crLi(item.empId)?.querySelector('.update button');
+                        const sameRestore = action.type === 'restore-confirm' && String((_crRank(item.empId) || {}).value || '') === String(item.origPosVal || '');
                         if (!_crUpdateVis(item.empId)) {
-                            return { type: action.type === 'switch-confirm' ? 'switch-confirm-ok' : 'restore-confirm-ok' };
+                            if (sameRestore) return { type: 'restore-confirm-ok' };
+                            return { type: 'hold', message: 'Torn\'s Update button is not visible, so no position change was sent for ' + item.empName + '. Check the page. This step will not be retried.', needsRestore: true };
                         }
-                        if (!btn) return { type: 'fail', message: 'Update button missing for ' + item.empName + '.' };
+                        if (!btn) return { type: 'hold', message: 'Update button missing for ' + item.empName + '. Nothing was sent.', needsRestore: true };
+                        const before = _crMsg();
                         _crClearMsg();
                         btn.click();
-                        await _crWait(1500, () => !_crUpdateVis(item.empId) || _crIsErr(_crMsg()));
-                        if (_crIsErr(_crMsg())) return { type: 'fail', message: _crMsg() };
-                        if (_crUpdateVis(item.empId)) return { type: 'fail', message: 'Position update was not confirmed for ' + item.empName + '.' };
+                        const saw = await _crWait(1500, () => !_crUpdateVis(item.empId) || (_crMsg() && _crMsg() !== before));
+                        const msg = _crMsg();
+                        if (msg && msg !== before && _crIsErr(msg)) return { type: 'hold', message: msg + ' Not retried.', needsRestore: true };
+                        if (!saw || _crUpdateVis(item.empId)) return { type: 'hold', message: 'Position update was not confirmed for ' + item.empName + '. It was not retried. Check Torn.', needsRestore: true };
                         return { type: action.type === 'switch-confirm' ? 'switch-confirm-ok' : 'restore-confirm-ok' };
                     }
                     if (action.type === 'restore-set') {
@@ -22225,12 +22310,14 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     if (action.type === 'train') {
                         const link = _crTrainLink(item.empId);
                         if (!link || link.classList.contains('disabled')) return { type: 'fail', message: 'Train control is not available for ' + item.empName + '.' };
+                        const before = _crMsg();
                         _crClearMsg();
                         link.click();
-                        const saw = await _crWait(1600, () => _crMsg().length > 0);
+                        const saw = await _crWait(1600, () => { const m = _crMsg(); return m.length > 0 && m !== before; });
                         const msg = _crMsg();
-                        if (!saw) return { type: 'fail', message: 'Train was not confirmed for ' + item.empName + '. Not counted.' };
-                        if (_crIsErr(msg)) return { type: 'fail', message: msg };
+                        const needsRestore = !!(item.switched && !item.restored);
+                        if (!saw) return { type: 'hold', message: 'No new confirmation for ' + item.empName + '. The train was not counted and will not be sent again. Check the company train counter and this employee.', needsRestore: needsRestore };
+                        if (_crIsErr(msg)) return { type: 'hold', message: msg + ' Not counted and not retried.', needsRestore: needsRestore };
                         Storage.logTrained(item.empId, item.empName, Math.floor(Date.now() / 1000), null);
                         if (UI.state?.detailed && UI.state.detailed.trains_available != null) {
                             UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
@@ -22271,8 +22358,7 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                             }
                         }
                         if (action.type === 'switch-confirm' && !_crUpdateVis(action.item.empId)) {
-                            run = ContractStatRun.reduce(run, { type: 'switch-confirm-ok' });
-                            return { run: run, defer: true };
+                            return { run: run, defer: false };
                         }
                         if (action.type === 'restore-confirm' && action.item && String((_crRank(action.item.empId) || {}).value || '') === String(action.item.origPosVal || '') && !_crUpdateVis(action.item.empId)) {
                             run = ContractStatRun.reduce(run, { type: 'restore-confirm-ok' });
@@ -22290,6 +22376,18 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     _crBusy = true;
                     _crButtons();
                     try {
+                        if (_tnState !== 'idle' && _tnState !== 'done') {
+                            _crStatus('Train Next is in progress. Finish or cancel it before a contract step.', '#ef4444');
+                            return;
+                        }
+                        if (_srState !== 'idle' && _srState !== 'done') {
+                            _crStatus('Stat Rotation is in progress. Finish or cancel it before a contract step.', '#ef4444');
+                            return;
+                        }
+                        if (_psPhase !== 'ready') {
+                            _crStatus('Quick Train has a step waiting. Finish that before a contract step.', '#ef4444');
+                            return;
+                        }
                         const mode = (Storage.getSettings() || {}).rotationMode || 'priority';
                         if (mode !== 'contract_rotational') {
                             _crStatus('Select Contracts, then press the step button. Changing the mode does not train or move anyone.', '#f59e0b');
@@ -22338,14 +22436,7 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                 if (!_crStartBtn || !_crStatusEl) {
                     console.error('[TCM] contract training controls were not created');
                 }
-                _crStartBtn?.addEventListener('click', (ev) => {
-                    ev.preventDefault();
-                    ev.stopPropagation();
-                    _crStep();
-                });
-                _crCancelBtn?.addEventListener('click', (ev) => {
-                    ev.preventDefault();
-                    ev.stopPropagation();
+                const _crCancelClick = () => {
                     try {
                         if (_crBusy) {
                             _crStatus('This click is still finishing. Cancel does not queue another action.', '#f59e0b');
@@ -22364,6 +22455,7 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                         if (away) {
                             run.phase = 'restore-set';
                             run.stopAfterRestore = true;
+                            run.manual = 1;
                             run.error = '';
                             _crSave(run);
                             _crStatus('Press the button to restore ' + item.empName + '. Cancel does not move them.', '#f59e0b');
@@ -22377,7 +22469,7 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     } catch (err) {
                         _crStatus('Cancel failed: ' + ((err && err.message) || err), '#ef4444');
                     }
-                });
+                };
                 _crButtons();
                 const _crExisting = _crLoad();
                 if (_crExisting && _crExisting.active) {
@@ -22493,134 +22585,126 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                 });
 
 
-                bar.querySelector('#tcm-ps-btn')?.addEventListener('click', () => {
-                    const empSel   = bar.querySelector('#tcm-ps-emp');
-                    const posSel   = bar.querySelector('#tcm-ps-pos');
-                    const statusEl = bar.querySelector('#tcm-ps-status');
-                    const psBtn    = bar.querySelector('#tcm-ps-btn');
-                    const empId    = empSel?.value;
-                    const tempPos  = posSel?.value;
-
-                    if (!empId || !tempPos) {
-                        if (statusEl) { statusEl.textContent = '⚠ Pick an employee and position first.'; statusEl.style.color = '#ef4444'; }
+                const _psClick = async () => {
+                    const statusEl = tcmById('tcm-ps-status');
+                    const psBtn = tcmById('tcm-ps-btn');
+                    if (_psBusy) { _say(statusEl, 'Finish the current click. Extra clicks are ignored.', '#f59e0b'); return; }
+                    const pending = _restorePendingName();
+                    if (pending) { _say(statusEl, pending + ' still needs a contract restore. Quick Train will not move or train anyone.', '#ef4444'); return; }
+                    if (_crBusy || (_tnState !== 'idle' && _tnState !== 'done') || (_srState !== 'idle' && _srState !== 'done')) {
+                        _say(statusEl, 'Another company step is still unfinished.', '#f59e0b');
                         return;
                     }
-                    const empLi  = document.querySelector(`li[data-user="${empId}"]`);
-                    if (!empLi) {
-                        if (statusEl) { statusEl.textContent = '⚠ Employee row not on page — reload.'; statusEl.style.color = '#ef4444'; }
-                        return;
-                    }
-                    const rankSel   = empLi.querySelector('select.employee-rank');
-                    const updateDiv = empLi.querySelector('.update');
-                    const updateBtn = updateDiv?.querySelector('button');
-                    const trainLink = empLi.querySelector('a.train-action[href*="trainemp"]') || empLi.querySelector('a[href*="trainemp"]');
-                    if (!rankSel) {
-                        if (statusEl) { statusEl.textContent = '⚠ Position dropdown not found.'; statusEl.style.color = '#ef4444'; }
-                        return;
-                    }
-
-                    const originalPos = _tcmGmGet('TCM_ps_orig_' + empId, rankSel.value);
-
-    const _successMsg = tcmById('emp_message');
-    if (_successMsg && _successMsg.innerText.trim() !== '' && !psBtn._pendingSubmit && !psBtn._pendingRestore) {
-  _successMsg.remove();
-  if (updateDiv) {
-      updateDiv.classList.remove('t-show');
-      updateDiv.classList.add('d-hidden');
-  }
-}
-    const isUpdateVis = updateDiv && updateDiv.classList.contains('t-show') && !updateDiv.classList.contains('d-hidden');
-    const trainsLeft = UI.state?.detailed?.trains_available ?? 1;
-
-                    if (psBtn._locked) return;
-                    psBtn._locked = true;
-                    setTimeout(() => { psBtn._locked = false; }, 600);
-
-
-if (rankSel.value !== tempPos && !psBtn._pendingRestore) {
-  _tcmGmSet('TCM_ps_orig_' + empId, rankSel.value);
-  rankSel.value = tempPos;
-  rankSel.dispatchEvent(new Event('change', { bubbles: true }));
-  const uiLabel = empLi.querySelector('.ui-selectmenu-status');
-  if (uiLabel) { const o = rankSel.options[rankSel.selectedIndex]; if (o) uiLabel.textContent = o.textContent.trim(); }
-  if (updateDiv) { updateDiv.classList.remove('d-hidden','t-hide'); updateDiv.classList.add('t-show'); }
-  psBtn._pendingSubmit = true;
-  if (statusEl) { statusEl.textContent = '1/3 Position changed — click again to submit.'; statusEl.style.color = '#f59e0b'; }
-  return;
-}
-
-
-if ((isUpdateVis || psBtn._pendingRestore) && updateBtn) {
-  psBtn._pendingSubmit = false;
-  psBtn._pendingRestore = false;
-  updateBtn.click();
-  if (statusEl) { statusEl.textContent = '2/3 Submitted — click again to train.'; statusEl.style.color = '#f59e0b'; }
-  return;
-}
-
-
-                    if (trainsLeft > 0) {
-                        if (!trainLink || trainLink.classList.contains('disabled')) {
-                            if (statusEl) { statusEl.textContent = '⚠ Train link not available.'; statusEl.style.color = '#ef4444'; }
+                    if (_psPhase === 'check') { _say(statusEl, 'Check Torn before another Quick Train. The last request was not counted and will not be sent again.', '#ef4444'); return; }
+                    const empId = tcmById('tcm-ps-emp')?.value;
+                    const tempPos = tcmById('tcm-ps-pos')?.value;
+                    if (!empId || !tempPos) { _say(statusEl, 'Pick an employee and position first.', '#ef4444'); return; }
+                    const row = _rowFor(empId);
+                    const rank = row?.querySelector('select.employee-rank, select');
+                    if (!row || !rank) { _say(statusEl, 'Employee position dropdown is not on the page.', '#ef4444'); return; }
+                    const updateBtn = row.querySelector('.update button');
+                    const trainLink = row.querySelector('a.train-action[href*="trainemp"]') || row.querySelector('a[href*="trainemp"]');
+                    _psBusy = true;
+                    if (psBtn) psBtn.disabled = true;
+                    try {
+                        if (_psPhase === 'ready' && String(rank.value) !== String(tempPos)) {
+                            _tcmGmSet('TCM_ps_orig_' + empId, rank.value);
+                            rank.value = tempPos;
+                            rank.dispatchEvent(new Event('change', { bubbles: true }));
+                            const upd = row.querySelector('.update');
+                            if (upd) { upd.classList.remove('d-hidden', 't-hide'); upd.classList.add('t-show'); }
+                            _psPhase = 'submit';
+                            if (psBtn) psBtn.textContent = 'Submit move';
+                            _say(statusEl, 'Dropdown changed. Press again to submit. Nothing was sent yet.', '#f59e0b');
                             return;
                         }
-trainLink.click();
-                        const _psEmpName = UI.state?.employees?.[empId]?.name || empSel?.options[empSel.selectedIndex]?.textContent?.trim() || empId;
-                        Storage.logTrained(empId, _psEmpName, Math.floor(Date.now() / 1000), null);
-                        if (UI.state?.detailed && UI.state.detailed.trains_available != null) {
-                            UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
+                        if (_psPhase === 'submit' || (_psPhase === 'ready' && _updateVisible(row))) {
+                            if (!_updateVisible(row) || !updateBtn) { _psPhase = 'check'; _say(statusEl, 'Update is not visible, so the move was not sent. Check Torn.', '#ef4444'); return; }
+                            const before = _tornMsg();
+                            _clearTornMsg();
+                            updateBtn.click();
+                            const saw = await _waitUntil(1500, () => !_updateVisible(_rowFor(empId)) || (_tornMsg() && _tornMsg() !== before));
+                            const msg = _tornMsg();
+                            if (!saw || _updateVisible(_rowFor(empId)) || (msg && msg !== before && _msgIsErr(msg))) {
+                                _psPhase = 'check';
+                                _say(statusEl, 'The move was not confirmed. It was not retried. Check Torn.', '#ef4444');
+                                return;
+                            }
+                            _psPhase = 'train';
+                            if (psBtn) psBtn.textContent = 'Train';
+                            _say(statusEl, 'Move submitted. Press again to train once.', '#f59e0b');
+                            return;
                         }
-                        const _psRow2 = trainLink.closest('[data-user]') || trainLink.closest('tr') || trainLink.closest('li');
-                        if (_psRow2) {
-                            document.querySelectorAll('.tcm-train-sent-badge').forEach(b => b.remove());
-                            const _psBadge2 = document.createElement('span');
-                            _psBadge2.className = 'tcm-train-sent-badge';
-                            _psBadge2.textContent = '✓ Trained · Quick Train';
-                            Object.assign(_psBadge2.style, {
-                                position: 'absolute', top: '4px', right: '4px',
-                                background: 'rgba(0,0,0,0.88)', border: '1px solid #f59e0b',
-                                color: '#f59e0b', fontSize: '10px', fontWeight: '700',
-                                padding: '2px 8px', borderRadius: '3px',
-                                fontFamily: 'Arial, sans-serif', zIndex: '9999',
-                                pointerEvents: 'none', transition: 'opacity 1s'
-                            });
-                            _psRow2.style.position = 'relative';
-                            _psRow2.appendChild(_psBadge2);
-                            setTimeout(() => { _psBadge2.style.opacity = '0'; }, 2500);
-                            setTimeout(() => { _psBadge2.remove(); }, 3600);
+                        if ((UI.state?.detailed?.trains_available ?? 0) <= 0) { _say(statusEl, 'No company trains are available. Nobody was trained.', '#ef4444'); return; }
+                        if (!trainLink || trainLink.classList.contains('disabled')) { _say(statusEl, 'Train control is not available.', '#ef4444'); return; }
+                        const before = _tornMsg();
+                        _clearTornMsg();
+                        trainLink.click();
+                        const saw = await _waitUntil(1600, () => { const m = _tornMsg(); return m.length > 0 && m !== before; });
+                        const msg = _tornMsg();
+                        if (!saw || _msgIsErr(msg)) {
+                            _psPhase = 'check';
+                            if (psBtn) psBtn.textContent = 'Check Torn';
+                            _say(statusEl, !saw ? 'No new confirmation. The train was not counted and will not be sent again. Check Torn.' : msg, '#ef4444');
+                            return;
                         }
-if (statusEl) { statusEl.textContent = '✓ Trained! Click Quick Train to train again, or use ↩ Restore Position when done.'; statusEl.style.color = '#7eb8ff'; }
-        psBtn.disabled = true;
-        setTimeout(() => { if (psBtn) psBtn.disabled = false; }, 2000);
-                    } else {
-        if (statusEl) { statusEl.textContent = '⚠ No trains left today. Use ↩ Restore Position when ready.'; statusEl.style.color = '#ef4444'; }
-    }
-                });
-
-                bar.querySelector('#tcm-ps-restore')?.addEventListener('click', () => {
-                    const _rSel    = bar.querySelector('#tcm-ps-emp');
-                    const _rStatus = bar.querySelector('#tcm-ps-status');
-                    const _rEmpId  = _rSel?.value;
-                    if (!_rEmpId) { if (_rStatus) { _rStatus.textContent = '⚠ Select an employee first.'; _rStatus.style.color = '#ef4444'; } return; }
-                    const _rOrig   = _tcmGmGet('TCM_ps_orig_' + _rEmpId, '');
-                    if (!_rOrig)   { if (_rStatus) { _rStatus.textContent = '⚠ No saved position — use Quick Train first, or move manually in Torn.'; _rStatus.style.color = '#f59e0b'; } return; }
-                    const _rLi     = document.querySelector(`li[data-user="${_rEmpId}"]`);
-                    const _rRank   = _rLi?.querySelector('select.employee-rank');
-                    const _rUpdDiv = _rLi?.querySelector('.update');
-                    const _rUpdBtn = _rUpdDiv?.querySelector('button');
-                    if (!_rRank) { if (_rStatus) { _rStatus.textContent = '⚠ Position dropdown not found — reload the page.'; _rStatus.style.color = '#ef4444'; } return; }
-                    if (_rRank.value === _rOrig) { if (_rStatus) { _rStatus.textContent = '✓ Already in original position.'; _rStatus.style.color = '#7eb8ff'; } return; }
-                    _rRank.value = _rOrig;
-                    _rRank.dispatchEvent(new Event('change', { bubbles: true }));
-                    const _rLabel = _rLi?.querySelector('.ui-selectmenu-status');
-                    if (_rLabel) { const _rO = _rRank.options[_rRank.selectedIndex]; if (_rO) _rLabel.textContent = _rO.textContent.trim(); }
-                    if (_rUpdDiv) { _rUpdDiv.classList.remove('d-hidden', 't-hide'); _rUpdDiv.classList.add('t-show'); }
-                    if (_rStatus) { _rStatus.textContent = '↩ Restoring…'; _rStatus.style.color = '#7eb8ff'; }
-                    setTimeout(() => {
-                        _rUpdBtn?.click();
-                        setTimeout(() => { if (_rStatus) { _rStatus.textContent = '✓ Position restored.'; _rStatus.style.color = '#7eb8ff'; } }, 600);
-                    }, 400);
-                });
+                        const name = UI.state?.employees?.[empId]?.name || empId;
+                        Storage.logTrained(empId, name, Math.floor(Date.now() / 1000), null);
+                        if (UI.state?.detailed && UI.state.detailed.trains_available != null) UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
+                        _psPhase = 'ready';
+                        if (psBtn) psBtn.textContent = '▶ Quick Train';
+                        _say(statusEl, 'One train confirmed. Press Quick Train again for another, or Restore Position when finished.', '#7eb8ff');
+                    } finally {
+                        _psBusy = false;
+                        const live = tcmById('tcm-ps-btn');
+                        if (live) live.disabled = false;
+                    }
+                };
+                const _psRestore = async () => {
+                    const statusEl = tcmById('tcm-ps-status');
+                    if (_psBusy) { _say(statusEl, 'Finish the current click. Extra clicks are ignored.', '#f59e0b'); return; }
+                    const empId = tcmById('tcm-ps-emp')?.value;
+                    if (!empId) { _say(statusEl, 'Select an employee first.', '#ef4444'); return; }
+                    const orig = _tcmGmGet('TCM_ps_orig_' + empId, '');
+                    if (!orig) { _say(statusEl, 'No saved position. Use Quick Train first, or move the employee in Torn.', '#f59e0b'); return; }
+                    const row = _rowFor(empId);
+                    const rank = row?.querySelector('select.employee-rank, select');
+                    if (!rank) { _say(statusEl, 'Position dropdown is not on the page.', '#ef4444'); return; }
+                    _psBusy = true;
+                    try {
+                        if (_psPhase !== 'restore-submit') {
+                            if (String(rank.value) === String(orig)) { _say(statusEl, 'Already on the saved position. Torn was not clicked.', '#7eb8ff'); return; }
+                            if (!_srSetDrop(empId, orig, false)) { _say(statusEl, 'Could not select the saved position.', '#ef4444'); return; }
+                            _psPhase = 'restore-submit';
+                            const b = tcmById('tcm-ps-restore');
+                            if (b) b.textContent = 'Submit restore';
+                            _say(statusEl, 'Saved position selected. Press again to submit. Nothing was sent yet.', '#7eb8ff');
+                            return;
+                        }
+                        const btn = row.querySelector('.update button');
+                        if (!_updateVisible(row) || !btn) { _psPhase = 'check'; _say(statusEl, 'Update is not visible, so the restore was not sent. Check Torn.', '#ef4444'); return; }
+                        const before = _tornMsg();
+                        _clearTornMsg();
+                        btn.click();
+                        const saw = await _waitUntil(1500, () => !_updateVisible(_rowFor(empId)) || (_tornMsg() && _tornMsg() !== before));
+                        if (!saw || _updateVisible(_rowFor(empId))) { _psPhase = 'check'; _say(statusEl, 'Restore was not confirmed. It was not retried. Check Torn.', '#ef4444'); return; }
+                        _psPhase = 'ready';
+                        const b = tcmById('tcm-ps-restore');
+                        if (b) b.textContent = '↩ Restore Position';
+                        _say(statusEl, 'Restore submitted.', '#7eb8ff');
+                    } finally { _psBusy = false; }
+                };
+                _companyDispatch = {
+                    'tcm-cr-start': () => { _crStep(); },
+                    'tcm-cr-cancel': _crCancelClick,
+                    'tcm-train-next-btn': _tnClick,
+                    'tcm-tn-cancel': _tnCancel,
+                    'tcm-sr-btn': _srClick,
+                    'tcm-sr-cancel': _srCancel,
+                    'tcm-ps-btn': () => { _psClick(); },
+                    'tcm-ps-restore': () => { _psRestore(); }
+                };
+                _armCompanyClicks();
 
 
                 const _manageHeading = Array.from(document.querySelectorAll('.title-black.top-round'))
@@ -22775,10 +22859,10 @@ const trainNextBtn = tcmById('tcm-train-next-btn');
                     });
                 }
                 const _psOverride = !!_psActiveId;
-                const linkIsUsable = _effLink && !_effLink.closest('[class*="disabled"]') && !_effLink.closest('[class*="done"]') && _effLink.offsetParent !== null;
+                const linkIsUsable = _effLink && !_effLink.classList.contains('disabled') && !_effLink.closest('[class*="disabled"]') && !_effLink.closest('[class*="done"]');
                 if (_effId && _effLink && linkIsUsable) {
                     trainNextBtn.disabled = false;
-                    trainNextBtn.textContent = `▶ Train ${_effName}`;
+                    trainNextBtn.textContent = 'Train Next';
                     trainNextBtn.style.borderColor = _psOverride ? '#f59e0b' : '#7eb8ff';
                     trainNextBtn.style.color       = _psOverride ? '#f59e0b' : '#7eb8ff';
                     trainNextBtn.style.background  = _psOverride ? 'rgba(245,158,11,0.15)' : 'rgba(126,184,255,0.15)';
@@ -22818,7 +22902,7 @@ const trainNextBtn = tcmById('tcm-train-next-btn');
                             const empName = UI.state?.employees?.[nextId]?.name || ('#' + nextId);
                             trainNextBtn._nextId = nextId;
                             trainNextBtn._nextName = empName;
-                            trainNextBtn.textContent = '▶ Train ' + empName;
+                            trainNextBtn.textContent = 'Train Next';
                             trainNextBtn.disabled = false;
                         }
                     }

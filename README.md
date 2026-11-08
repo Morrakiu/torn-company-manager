@@ -68,11 +68,15 @@ On a training contract you can set a preferred stat: MAN, INT, or END. Leave it 
 
 On the company page, choose **Contracts**. Changing the mode does not move or train anyone. The step button then names the single next action, for example **Move JT100 to Guard**, **Submit move for JT100**, **Train JT100 (1/2)**, or **Restore JT100 to Cleaner**. Each press does at most that one action. Finishing it only changes the label. It does not click Torn again. Presses while a click is still waiting are ignored and are not queued.
 
-11.1.0 ran every remaining step by itself after one press. Do not use that build for company training. That build also looked the button up before the bar was on the page, so the press could do nothing and show no status. 11.1.1 binds the button on the bar and writes a reason next to it when a step cannot run.
+11.1.0 ran every remaining step by itself after one press. Do not use that build for company training. 11.1.2 keeps the same manual contract steps. A saved 11.1.0 run is not resumed: if someone was away from the saved position, the button offers only the restore press; otherwise that old run is cleared and nothing is sent.
 
-The position with the highest training gain for the preferred stat is chosen. Requirements are not used. Equal gains stay on the current position when it is one of the ties. The dropdown value is saved before a move. If the employee is already there, that press does not move them and does not train them. A contract with no stat is trained in place, still one train per press.
+The position with the highest training gain for the preferred stat is chosen, including a secondary gain. Requirements are not used. Equal gains stay on the current position when it is one of the ties. The dropdown value is saved before a move. If the employee is already there, that press does not move them and does not train them. A contract with no stat is trained in place, still one train per press.
 
-A train counts only after Torn shows a confirmation that is not an error. If no position has a numeric gain, the status says so and nothing is moved. Cancel, a failed step, or a reload never moves or trains by itself. If someone is away from the saved position, the button offers the restore press. Do not run the steps on two devices at once. The preferred stat syncs with the contract. The in-progress step does not. Torn's published scripting rule says a non-API request must be directly and manually initiated by the user. This button is built so one press makes at most one such request. That is not a staff review, and it does not clear the rest of the script. Quick Train's restore and Stat Rotation still press Torn's Update from a timer after an earlier click.
+A train counts only when Torn shows a new confirmation that is not an error. The previous success text does not count as a new train. If the result is missing or unclear, the train is not counted and the button will not send it again; check Torn's train counter and that employee. If no position has a numeric gain, the status says so and nothing is moved. Cancel, a failed step, or a reload never moves or trains by itself. If someone is away from the saved position, the button offers the restore press, and Quick Train, Train Next, and Stat Rotation will not move or train until that restore is finished. Do not run the steps on two devices at once. The preferred stat syncs with the contract. The in-progress step does not.
+
+Quick Train, Train Next, and Stat Rotation use the same rule: one press changes the dropdown, the next press submits that update, and a train is its own press. Cancel does not restore by itself. Withdrawal and deposit presets fill the amount and do not press Torn's button. The price tool fills the price and does not press Submit.
+
+Torn's scripting rule, on [the rules page](https://www.torn.com/rules.php) and in bogie's [26 January 2026 clarification](https://www.torn.com/forums.php?p=threads&f=1&t=16534470&b=0&a=0), says a non-API request must be directly and manually initiated by the user, on a page the player has loaded and is actively viewing. These company buttons are built so one press makes at most one such request. That is not a staff review and not a statement that the live game will behave exactly as the local tests do. The weekly target buttons inside the TCM panel still save local planning data; they do not send a company train or position update.
 
 ## Tests
 
@@ -85,6 +89,7 @@ node tools/tcm-boot-check.js
 node tools/tcm-sync-harness.js
 node tools/tcm-contract-stat-test.js
 node tools/tcm-contract-start-dom-test.js
+node tools/tcm-company-clicks-test.js
 node tools/build-min-userscript.js
 ```
 
@@ -98,7 +103,7 @@ The sync harness is an in-memory two-device gist. It does not call GitHub and do
 4. Remove someone from rotation exclude, delete a contract payment, and confirm the other device does not put them back.
 5. During a company switch, Sync Now should say it is waiting, not upload an empty training log.
 6. Turn the device clock far ahead, edit on the other device after it has synced, and confirm the later edit still wins.
-7. Set a contract to MAN. On the company page select Contracts and read the step button. Each press should do only the labeled action: move, submit that move, one train, or restore. Spam and reload must not continue. 11.1.0 should be updated before using this, because that build tried to run the sequence by itself and its Start press could do nothing.
+7. Set a contract to MAN. On the company page select Contracts and read the step button. Each press should do only the labeled action: move, submit that move, one train, or restore. After the restore is submitted, the next contract's train or move waits for another press. Spam, a missing confirmation, and reload must not continue. Quick Train, Train Next, and Stat Rotation should also wait for a separate press before Update or the next train. A withdrawal preset should fill the amount and leave Torn's Withdraw button for you. These checks need a real Torn company page; the automated tests use a stand-in DOM, not Torn PDA and not a live account.
 
 ## License
 
