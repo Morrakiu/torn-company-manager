@@ -2,7 +2,7 @@
 
 Tampermonkey and Torn PDA userscript for company directors on [Torn](https://www.torn.com).
 
-**Version:** 11.0.0-beta  
+**Version:** 11.1.0-beta  
 **Author:** Morrakiu  
 **Install / updates:** [Torn_Company_Manager.user.js](./Torn_Company_Manager.user.js) on branch `Morrakiu-TCM-Beta`
 
@@ -62,6 +62,21 @@ JSONBin is not a sync path. If this device still has a bin id and master key fro
 
 Create a GitHub token with only the gist scope (classic) or fine-grained Gists read/write. Put the same gist id on each device. The token is stored only on that device.
 
+## Contract position training
+
+On a training contract you can set a preferred stat: MAN, INT, or END. Leave it blank and that employee is never moved.
+
+On the company page, choose **Contracts**, then press **Start contract training**. Changing the mode does not train anyone. For each contract that still has trains allotted today, and only while the company still has trains:
+
+1. If a stat is set, the position with the highest training gain for that stat is chosen. Requirements are not used. Equal gains stay on the employee's current position when that position is one of the ties; otherwise the name order decides.
+2. The current position dropdown value is saved before anything moves.
+3. The script moves, waits until Torn accepts the update, trains one allotment at a time, and counts a train only after Torn shows a confirmation that is not an error.
+4. It restores the saved position and waits for that update before the next contract.
+
+If no position has a numeric gain for the stat, the run stops and shows that. It does not guess. A failed move, train, or restore does not count and does not open the next contract while a position is still unrestored. Reload keeps that state until you press Resume. Cancel restores the current employee and stops.
+
+The run is stored only on this device (`contract_stat_run`). The gist cannot lock a live training session. Do not press Start on two devices at once. The preferred stat itself syncs with the contract.
+
 ## Tests
 
 From a checkout, with Node, `jsdom`, and `terser`:
@@ -71,6 +86,7 @@ node --check Torn_Company_Manager.user.js
 node tools/tcm-log-page-test.js
 node tools/tcm-boot-check.js
 node tools/tcm-sync-harness.js
+node tools/tcm-contract-stat-test.js
 node tools/build-min-userscript.js
 ```
 
@@ -84,6 +100,7 @@ The sync harness is an in-memory two-device gist. It does not call GitHub and do
 4. Remove someone from rotation exclude, delete a contract payment, and confirm the other device does not put them back.
 5. During a company switch, Sync Now should say it is waiting, not upload an empty training log.
 6. Turn the device clock far ahead, edit on the other device after it has synced, and confirm the later edit still wins.
+7. Set JT100's contract to MAN. On the company page select Contracts, press Start, and confirm the move, the allotted trains, and the restore happen before the next employee. Pressing Contracts by itself must not move anyone. A contract with no stat must stay in place.
 
 ## License
 

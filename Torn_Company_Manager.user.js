@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TCM
 // @namespace    TCM
-// @version      11.0.0-beta
+// @version      11.1.0-beta
 // @charset      utf-8
 // @description  Decision-support dashboard for Torn City company directors. Financial tracking, employee effectiveness, smart training rotation, promotion projections, and recommendations. No automation - all actions are user-triggered.
 // @author       Morrakiu
@@ -388,7 +388,7 @@
 
 
     const TCM = {
-        VERSION: '11.0.0-beta',
+        VERSION: '11.1.0-beta',
         NS: 'TCM_v2_',
         API_BASE: 'https://api.torn.com',
         API_RATE_LIMIT_MS: 1000,
@@ -15495,6 +15495,10 @@ class="tcm-input tcm-sale-reservation" data-id="${c.id}"
 style="width:55px;padding:3px 6px;font-size:12px;" />
 <span style="font-size:11px;color:#888;">trains/day</span>
 </div>
+<div class="tcm-row" style="margin-top:4px;">
+<span class="lbl">Preferred stat</span>
+<span class="val">${ContractStatRun.normalizeStat(c.preferredStat) ? ContractStatRun.normalizeStat(c.preferredStat).toUpperCase() : 'None — no position switch'}</span>
+</div>
 ${c.isFree ? '' : `<div class="tcm-row" style="margin-top:4px;">
 <span class="lbl">Free trains</span>
 <div style="display:flex;align-items:center;gap:6px;">
@@ -15618,6 +15622,16 @@ Fully free (entire contract complimentary)
 <div>
 <div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Start date</div>
 <input class="tcm-input" id="sale-startdate" type="date" value="${today}" style="width:100%;box-sizing:border-box;"/>
+</div>
+<div>
+<div style="font-size:12px;color:#9ca3af;margin-bottom:3px;">Preferred training stat</div>
+<select class="tcm-input" id="sale-stat" style="width:100%;box-sizing:border-box;">
+<option value="">No preference — do not switch position</option>
+<option value="man">MAN</option>
+<option value="int">INT</option>
+<option value="end">END</option>
+</select>
+<div style="font-size:11px;color:#4b5563;margin-top:3px;">Used only when you press Start contract training. Blank never moves this employee.</div>
 </div>
 </div>
 <div style="margin-bottom:10px;">
@@ -15890,6 +15904,8 @@ payments: fullyFree ? [] : payments,
 active: true,
 updatedAt: Date.now()
 });
+const _newPref = ContractStatRun.normalizeStat(tcmById('sale-stat')?.value);
+if (_newPref) sales[sales.length - 1].preferredStat = _newPref;
 Storage.saveTrainSales(sales);
 this._renderTab('calc');
 });
@@ -15988,7 +16004,16 @@ const day = (existing && existing.startDate) || new Date().toISOString().slice(0
                             </div>
                         </div>
                         <div style="margin-bottom:10px;">
-                            <div style="font-size:11px;color:#9ca3af;margin-bottom:3px;">Notes</div>
+                            <div style="font-size:11px;color:#9ca3af;margin-bottom:3px;">Preferred training stat</div>
+<select id="${editorId}-stat" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #374151;border-radius:4px;color:#ddd;padding:4px 8px;font-size:13px;">
+<option value="" ${!ContractStatRun.normalizeStat(c.preferredStat) ? 'selected' : ''}>No preference — do not switch position</option>
+<option value="man" ${ContractStatRun.normalizeStat(c.preferredStat)==='man' ? 'selected' : ''}>MAN</option>
+<option value="int" ${ContractStatRun.normalizeStat(c.preferredStat)==='int' ? 'selected' : ''}>INT</option>
+<option value="end" ${ContractStatRun.normalizeStat(c.preferredStat)==='end' ? 'selected' : ''}>END</option>
+</select>
+</div>
+<div style="margin-bottom:10px;">
+<div style="font-size:11px;color:#9ca3af;margin-bottom:3px;">Notes</div>
                             <input type="text" id="${editorId}-notes" value="${(c.notes || '').replace(/"/g,'&quot;')}" placeholder="Optional notes"
                                 style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #374151;border-radius:4px;color:#ddd;padding:4px 8px;font-size:13px;"/>
                         </div>
@@ -16055,6 +16080,9 @@ const day = (existing && existing.startDate) || new Date().toISOString().slice(0
                             updatedSales[idx].dailyReservation = newRes;
                             updatedSales[idx].startDate        = newDate;
                             updatedSales[idx].notes            = newNotes;
+                            const _editStat = ContractStatRun.normalizeStat(tcmById(`${editorId}-stat`)?.value);
+                            if (_editStat) updatedSales[idx].preferredStat = _editStat;
+                            else delete updatedSales[idx].preferredStat;
                             updatedSales[idx].updatedAt        = Date.now();
                             Storage.saveTrainSales(updatedSales);
                         }
@@ -20952,6 +20980,311 @@ const _lsThresholdTxt = Storage.getSettings().lowStockThresholdDays ?? 1;
     }
 
 
+    /**
+     * Contract position training. Preferred stat is optional.
+     * Blank means do not move the employee. Gains are priGain/secGain for
+     * that stat, never the working-stat requirement. Execution state stays
+     * on this device; the gist cannot lock a live training session.
+     */
+    const ContractStatRun = {
+        KEY: 'contract_stat_run',
+        normalizeStat(v) {
+            const s = String(v || '').trim().toLowerCase();
+            return (s === 'man' || s === 'int' || s === 'end') ? s : '';
+        },
+        gainFor(data, stat) {
+            if (!data || !stat) return null;
+            const nums = [];
+            if (data.primary === stat && Number.isFinite(Number(data.priGain))) nums.push(Number(data.priGain));
+            if (data.secondary === stat && Number.isFinite(Number(data.secGain))) nums.push(Number(data.secGain));
+            if (!nums.length) return null;
+            return Math.max.apply(null, nums);
+        },
+        namesMatch(a, b) {
+            const left = String(a || '');
+            const right = String(b || '');
+            if (!left || !right) return false;
+            if (left === right || left.toLowerCase() === right.toLowerCase()) return true;
+            if (typeof PosNorm !== 'undefined' && PosNorm.normalize) {
+                return PosNorm.normalize(left).toLowerCase() === PosNorm.normalize(right).toLowerCase();
+            }
+            return false;
+        },
+        bestPosition(positions, stat, originalName) {
+            const want = this.normalizeStat(stat);
+            if (!want) return { ok: false, reason: 'no-stat' };
+            if (!positions || typeof positions !== 'object') return { ok: false, reason: 'no-gain', stat: want };
+            const cands = [];
+            for (const name of Object.keys(positions)) {
+                const gain = this.gainFor(positions[name], want);
+                if (gain == null) continue;
+                cands.push({ name: name, gain: gain });
+            }
+            if (!cands.length) return { ok: false, reason: 'no-gain', stat: want };
+            const max = cands.reduce((m, c) => c.gain > m ? c.gain : m, cands[0].gain);
+            const tied = cands.filter(c => c.gain === max).sort((a, b) => a.name.localeCompare(b.name));
+            const orig = tied.find(c => this.namesMatch(c.name, originalName));
+            const pick = orig || tied[0];
+            return { ok: true, name: pick.name, gain: pick.gain, tied: tied.map(c => c.name), stat: want };
+        },
+        uniqueCount(entries, pred) {
+            const seen = new Set();
+            let n = 0;
+            for (const e of entries || []) {
+                if (!e || (pred && !pred(e))) continue;
+                const key = e._logId != null && e._logId !== '' ? 'id:' + e._logId : (e.ts != null ? 'ts:' + e.ts : '');
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                n++;
+            }
+            return n;
+        },
+        countToday(entries, tornDayStartMs) {
+            return this.uniqueCount(entries, e => e.ts && Number(e.ts) >= Number(tornDayStartMs));
+        },
+        countContract(entries, startDate) {
+            return this.uniqueCount(entries, e => e.ts && (!startDate || String(e.date || '') >= String(startDate)));
+        },
+        /**
+         * opts.contracts in priority order.
+         * opts.logs[empId] = entries
+         * opts.reservations[contractId] = trains allotted today
+         * opts.trainsAvailable, opts.excluded (set or object), opts.employees, opts.positions, opts.tornDayStartMs
+         * Stops at the first preferred-stat contract whose gains cannot be resolved.
+         */
+        planQueue(opts) {
+            opts = opts || {};
+            const excluded = opts.excluded || {};
+            const employees = opts.employees || {};
+            const logs = opts.logs || {};
+            const reservations = opts.reservations || {};
+            let pool = Math.max(0, Number(opts.trainsAvailable) || 0);
+            const credited = {};
+            const queue = [];
+            for (const c of opts.contracts || []) {
+                if (!c || c.active === false || c.deleted) continue;
+                const empId = String(c.buyerEmpId || '');
+                if (!empId || !employees[empId]) continue;
+                if (excluded[empId] || (excluded instanceof Set && excluded.has(empId))) continue;
+                if (String(employees[empId].position || '') === 'Director') continue;
+                const reserved = Math.max(0, Number(reservations[c.id]) || 0);
+                const todayDone = (credited[empId] != null)
+                    ? credited[empId]
+                    : this.countToday(logs[empId], opts.tornDayStartMs || 0);
+                credited[empId] = todayDone;
+                let todayLeft = Math.max(0, reserved - todayDone);
+                const openEnded = !!c.openEnded || !(Number(c.totalTrains) > 0);
+                const contractDone = this.countContract(logs[empId], c.startDate);
+                if (!openEnded) todayLeft = Math.min(todayLeft, Math.max(0, Number(c.totalTrains) - contractDone));
+                const n = Math.min(todayLeft, pool);
+                if (n <= 0) continue;
+                const stat = this.normalizeStat(c.preferredStat);
+                let trainPosName = '';
+                if (stat) {
+                    const best = this.bestPosition(opts.positions, stat, employees[empId].position);
+                    if (!best.ok) {
+                        return {
+                            queue: queue,
+                            blocked: {
+                                contractId: c.id,
+                                empId: empId,
+                                name: employees[empId].name || c.buyerName || empId,
+                                stat: stat,
+                                reason: best.reason
+                            }
+                        };
+                    }
+                    trainPosName = best.name;
+                }
+                queue.push({
+                    contractId: String(c.id),
+                    empId: empId,
+                    empName: employees[empId].name || c.buyerName || empId,
+                    stat: stat,
+                    trainPosName: trainPosName,
+                    origPosName: employees[empId].position || '',
+                    origPosVal: '',
+                    toTrain: n,
+                    trainsDone: 0,
+                    todayAtStart: todayDone,
+                    contractDoneAtStart: contractDone,
+                    switched: false,
+                    restored: !stat
+                });
+                credited[empId] = todayDone + n;
+                pool -= n;
+            }
+            return { queue: queue, blocked: null };
+        },
+        remaining(item, currentToday, currentContractDone, trainsAvailable) {
+            if (!item) return 0;
+            const loggedTodayExtra = Math.max(0, (Number(currentToday) || 0) - (Number(item.todayAtStart) || 0) - (Number(item.trainsDone) || 0));
+            const loggedContractExtra = Math.max(0, (Number(currentContractDone) || 0) - (Number(item.contractDoneAtStart) || 0) - (Number(item.trainsDone) || 0));
+            const extra = Math.max(loggedTodayExtra, loggedContractExtra);
+            return Math.max(0, Math.min(
+                (Number(item.toTrain) || 0) - (Number(item.trainsDone) || 0) - extra,
+                Math.max(0, Number(trainsAvailable) || 0)
+            ));
+        },
+        fresh() {
+            return { active: false, phase: 'idle', index: 0, queue: [], stopAfterRestore: false, error: '', trainsLeft: 0 };
+        },
+        begin(plan, trainsAvailable) {
+            if (!plan || plan.blocked && (!plan.queue || !plan.queue.length)) {
+                return { run: this.fresh(), error: plan && plan.blocked ? this.blockMessage(plan.blocked) : 'Nothing to train.' };
+            }
+            if (!plan.queue || !plan.queue.length) return { run: this.fresh(), error: 'No contract trains are left in today\'s allotment.' };
+            const first = plan.queue[0];
+            const phase = first.stat ? 'capture' : 'train';
+            return {
+                error: '',
+                run: {
+                    active: true,
+                    phase: phase,
+                    index: 0,
+                    queue: plan.queue,
+                    stopAfterRestore: false,
+                    error: '',
+                    trainsLeft: Math.max(0, Number(trainsAvailable) || 0),
+                    blocked: plan.blocked || null
+                }
+            };
+        },
+        blockMessage(b) {
+            if (!b) return '';
+            return b.name + ' wants ' + String(b.stat || '').toUpperCase() + ', but this company has no position with a known ' + String(b.stat || '').toUpperCase() + ' training gain. Nothing was switched.';
+        },
+        current(run) {
+            if (!run || !run.queue) return null;
+            return run.queue[run.index] || null;
+        },
+        action(run) {
+            if (!run || !run.active) return { type: 'idle' };
+            const item = this.current(run);
+            if (!item) return { type: 'done' };
+            if (item.switched && !item.restored && (run.phase === 'advance' || run.phase === 'done' || run.phase === 'idle')) {
+                return { type: 'blocked', message: 'Position for ' + item.empName + ' is still unrestored.' };
+            }
+            if (run.phase === 'capture') return { type: 'capture', item: item };
+            if (run.phase === 'switch-set') return { type: 'switch-set', item: item };
+            if (run.phase === 'switch-confirm') return { type: 'switch-confirm', item: item };
+            if (run.phase === 'train') return { type: 'train', item: item };
+            if (run.phase === 'restore-set') return { type: 'restore-set', item: item };
+            if (run.phase === 'restore-confirm') return { type: 'restore-confirm', item: item };
+            if (run.phase === 'advance') return { type: 'advance', item: item };
+            return { type: 'done' };
+        },
+        _cloneRun(run) {
+            return JSON.parse(JSON.stringify(run));
+        },
+        reduce(run, event) {
+            const next = this._cloneRun(run);
+            const item = next.queue[next.index];
+            event = event || {};
+            if (event.type === 'fail') {
+                next.error = event.message || 'Stopped.';
+                if (item && item.switched && !item.restored) {
+                    next.phase = 'restore-set';
+                    next.stopAfterRestore = true;
+                } else {
+                    next.phase = 'blocked';
+                    next.active = true;
+                }
+                return next;
+            }
+            if (event.type === 'cancel') {
+                next.stopAfterRestore = true;
+                if (item && item.switched && !item.restored) next.phase = 'restore-set';
+                else { next.active = false; next.phase = 'idle'; }
+                return next;
+            }
+            if (!item) { next.active = false; next.phase = 'done'; return next; }
+            if (event.type === 'captured') {
+                item.origPosVal = event.origPosVal || '';
+                item.origPosName = event.origPosName || item.origPosName || '';
+                const same = !item.stat || !item.trainPosName || this.namesMatch(item.trainPosName, item.origPosName) || event.samePosition;
+                if (!item.stat || same) {
+                    item.switched = false;
+                    item.restored = true;
+                    next.phase = 'train';
+                } else {
+                    next.phase = 'switch-set';
+                }
+                return next;
+            }
+            if (event.type === 'switch-set-ok') { next.phase = 'switch-confirm'; return next; }
+            if (event.type === 'switch-confirm-ok') {
+                item.switched = true;
+                item.restored = false;
+                next.phase = 'train';
+                return next;
+            }
+            if (event.type === 'no-train') {
+                next.phase = item.switched && !item.restored ? 'restore-set' : 'advance';
+                if (!item.switched) item.restored = true;
+                return next;
+            }
+            if (event.type === 'train-ok') {
+                item.trainsDone = (item.trainsDone || 0) + 1;
+                next.trainsLeft = Math.max(0, (next.trainsLeft || 0) - 1);
+                const left = this.remaining(item, event.currentToday, event.currentContractDone, next.trainsLeft);
+                next.error = '';
+                if (left > 0) { next.phase = 'train'; return next; }
+                next.phase = item.switched && !item.restored ? 'restore-set' : 'advance';
+                if (!item.switched) item.restored = true;
+                return next;
+            }
+            if (event.type === 'restore-set-ok') { next.phase = 'restore-confirm'; return next; }
+            if (event.type === 'restore-confirm-ok') {
+                item.restored = true;
+                item.switched = false;
+                next.phase = next.stopAfterRestore ? 'idle' : 'advance';
+                if (next.phase === 'idle') next.active = false;
+                return next;
+            }
+            if (event.type === 'advance') {
+                if (item.switched && !item.restored) {
+                    next.phase = 'restore-set';
+                    next.error = 'Cannot start the next contract until the position is restored.';
+                    return next;
+                }
+                next.index += 1;
+                next.error = '';
+                const nxt = next.queue[next.index];
+                if (!nxt) {
+                    next.active = false;
+                    if (next.blocked) { next.phase = 'blocked'; next.error = this.blockMessage(next.blocked); }
+                    else next.phase = 'done';
+                    return next;
+                }
+                next.phase = nxt.stat ? 'capture' : 'train';
+                return next;
+            }
+            return next;
+        },
+        statusText(run) {
+            if (!run || !run.active) {
+                if (run && run.error) return run.error;
+                if (run && run.phase === 'done') return 'Contract training finished.';
+                return '';
+            }
+            const item = this.current(run);
+            if (!item) return 'Contract training finished.';
+            const stat = item.stat ? item.stat.toUpperCase() : 'current position';
+            const pos = item.trainPosName || 'current position';
+            const n = (item.trainsDone || 0) + '/' + (item.toTrain || 0);
+            if (run.phase === 'capture' || run.phase === 'switch-set' || run.phase === 'switch-confirm') {
+                return item.empName + ' ' + stat + ' → ' + pos + ' (' + n + '). Saving the original position, then moving.';
+            }
+            if (run.phase === 'train') return item.empName + ' ' + stat + ' in ' + pos + ' — trained ' + n + '.';
+            if (run.phase === 'restore-set' || run.phase === 'restore-confirm') {
+                return 'Restoring ' + item.empName + ' before the next contract.';
+            }
+            return item.empName + ' ' + n;
+        }
+    };
+
+
     function initTCMTrainInjection() {
         if (!window.location.href.includes('companies.php')) return;
 
@@ -21594,6 +21927,15 @@ _barInner.appendChild(_btnPri);
                     '<span id="tcm-sr-status" style="font-size:11px;color:#888;"></span>';
                 _barInner.appendChild(_srRowEl);
 
+                const _crRow = document.createElement('div');
+                _crRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;margin-top:6px;padding-top:6px;border-top:1px solid #2a2a2a;';
+                _crRow.innerHTML = '<span style="font-size:11px;color:#9ca3af;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">Contracts:</span>' +
+                    '<button id="tcm-cr-start" type="button" style="padding:3px 12px;border-radius:4px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.12);color:#f59e0b;font-size:11px;font-weight:700;cursor:pointer;font-family:Arial,sans-serif;">▶ Start contract training</button>' +
+                    '<button id="tcm-cr-cancel" type="button" style="padding:3px 8px;border-radius:4px;border:1px solid #374151;background:transparent;color:#888;font-size:11px;cursor:pointer;font-family:Arial,sans-serif;display:none;">✕ Cancel</button>' +
+                    '<span id="tcm-cr-status" style="font-size:11px;color:#888;"></span>' +
+                    '<span style="font-size:10px;color:#6b7280;">This device only. Do not start this on two devices at once. Changing TCM Mode does not train anyone.</span>';
+                _barInner.appendChild(_crRow);
+
                 bar.appendChild(_barInner);
 
 
@@ -21730,6 +22072,212 @@ bar.querySelector('#tcm-sr-cancel')?.addEventListener('click', () => {
                     _srSwitchedIds.clear();
                     _srQueue = []; _srIdx = 0; _srState = 'idle'; _srRefreshBtn();
                 });
+
+
+                const _crLoad = () => Storage.get(ContractStatRun.KEY, null);
+                const _crSave = (run) => {
+                    if (!run || !run.active) Storage.set(ContractStatRun.KEY, null);
+                    else Storage.set(ContractStatRun.KEY, run);
+                };
+                const _crStatus = (text, color) => {
+                    const el = tcmById('tcm-cr-status');
+                    if (!el) return;
+                    el.textContent = text || '';
+                    el.style.color = color || '#9ca3af';
+                };
+                const _crButtons = () => {
+                    const start = tcmById('tcm-cr-start');
+                    const cancel = tcmById('tcm-cr-cancel');
+                    const run = _crLoad();
+                    if (start) {
+                        start.disabled = !!_crBusy;
+                        start.textContent = (run && run.active) ? '▶ Resume contract training' : '▶ Start contract training';
+                    }
+                    if (cancel) cancel.style.display = (run && run.active) ? '' : 'none';
+                };
+                let _crBusy = false;
+                const _crWait = (ms, pred) => new Promise(resolve => {
+                    const t0 = Date.now();
+                    const tick = () => {
+                        let ok = false;
+                        try { ok = !!pred(); } catch (e) { ok = false; }
+                        if (ok || Date.now() - t0 >= ms) resolve(ok);
+                        else setTimeout(tick, 100);
+                    };
+                    tick();
+                });
+                const _crMsg = () => {
+                    const el = document.getElementById('emp_message');
+                    return (el && (el.innerText || el.textContent) || '').trim();
+                };
+                const _crIsErr = (text) => /error|fail|not enough|unable|cannot|can't|invalid|denied/i.test(text || '');
+                const _crClearMsg = () => { const el = document.getElementById('emp_message'); if (el) el.remove(); };
+                const _crLi = (id) => document.querySelector('li[data-user="' + id + '"]');
+                const _crRank = (id) => _crLi(id)?.querySelector('select.employee-rank');
+                const _crUpdateVis = (id) => {
+                    const d = _crLi(id)?.querySelector('.update');
+                    return !!(d && d.classList.contains('t-show') && !d.classList.contains('d-hidden'));
+                };
+                const _crTrainLink = (id) => {
+                    const li = _crLi(id);
+                    return li?.querySelector('a.train-action[href*="trainemp"]') || li?.querySelector('a[href*="trainemp"]');
+                };
+                const _crCounts = (item) => {
+                    const sale = (Storage.getTrainSales() || []).find(s => String(s.id) === String(item.contractId)) || {};
+                    const entries = (Storage.getTrainedLog() || {})[item.empId] || [];
+                    return {
+                        today: ContractStatRun.countToday(entries, Storage.tornDayStart()),
+                        contract: ContractStatRun.countContract(entries, sale.startDate)
+                    };
+                };
+                const _crBuild = () => {
+                    const state = UI.state || {};
+                    const log = Storage.getTrainedLog() || {};
+                    const today = new Date().toISOString().slice(0, 10);
+                    const excluded = {};
+                    (Storage.getRotation().excluded || []).forEach(id => { excluded[String(id)] = true; });
+                    const contracts = (Storage.getTrainSales() || []).filter(c => c && c.active !== false && !c.deleted);
+                    const reservations = {};
+                    contracts.forEach(c => { reservations[c.id] = Storage.contractReservationOnDate(c, today, log); });
+                    return ContractStatRun.planQueue({
+                        contracts: contracts,
+                        logs: log,
+                        reservations: reservations,
+                        trainsAvailable: state.detailed?.trains_available ?? 0,
+                        excluded: excluded,
+                        employees: state.employees || {},
+                        positions: CompanyData.positions(state.typeName),
+                        tornDayStartMs: Storage.tornDayStart()
+                    });
+                };
+                const _crPerform = async (action) => {
+                    const item = action.item || {};
+                    if (action.type === 'capture') {
+                        const rank = _crRank(item.empId);
+                        if (!rank) return { type: 'fail', message: item.empName + ': position dropdown is not on the page.' };
+                        const idx = item.trainPosName ? _srFindOptIdx(rank, item.trainPosName) : -1;
+                        if (item.stat && idx === -1) return { type: 'fail', message: item.trainPosName + ' is not in ' + item.empName + "'s position list." };
+                        return {
+                            type: 'captured',
+                            origPosVal: rank.value,
+                            origPosName: (rank.options[rank.selectedIndex] && rank.options[rank.selectedIndex].textContent.trim()) || item.origPosName,
+                            samePosition: !item.stat || idx === rank.selectedIndex
+                        };
+                    }
+                    if (action.type === 'switch-set') {
+                        const rank = _crRank(item.empId);
+                        if (!rank || !item.origPosVal) return { type: 'fail', message: 'Original position was not saved for ' + item.empName + '.' };
+                        const idx = _srFindOptIdx(rank, item.trainPosName);
+                        if (idx === -1) return { type: 'fail', message: item.trainPosName + ' is not in the dropdown.' };
+                        _tcmGmSet('TCM_ps_orig_' + item.empId, item.origPosVal);
+                        if (!_srSetDrop(item.empId, idx, true)) return { type: 'fail', message: 'Could not change the position dropdown.' };
+                        return { type: 'switch-set-ok' };
+                    }
+                    if (action.type === 'switch-confirm' || action.type === 'restore-confirm') {
+                        const btn = _crLi(item.empId)?.querySelector('.update button');
+                        if (!_crUpdateVis(item.empId)) {
+                            return { type: action.type === 'switch-confirm' ? 'switch-confirm-ok' : 'restore-confirm-ok' };
+                        }
+                        if (!btn) return { type: 'fail', message: 'Update button missing for ' + item.empName + '.' };
+                        _crClearMsg();
+                        btn.click();
+                        await _crWait(1500, () => !_crUpdateVis(item.empId) || _crIsErr(_crMsg()));
+                        if (_crIsErr(_crMsg())) return { type: 'fail', message: _crMsg() };
+                        if (_crUpdateVis(item.empId)) return { type: 'fail', message: 'Position update was not confirmed for ' + item.empName + '.' };
+                        return { type: action.type === 'switch-confirm' ? 'switch-confirm-ok' : 'restore-confirm-ok' };
+                    }
+                    if (action.type === 'restore-set') {
+                        const rank = _crRank(item.empId);
+                        if (!rank || !item.origPosVal) return { type: 'fail', message: 'Cannot restore ' + item.empName + '. The saved position is still stored.' };
+                        if (String(rank.value) === String(item.origPosVal)) return { type: 'restore-confirm-ok' };
+                        if (!_srSetDrop(item.empId, item.origPosVal, false)) return { type: 'fail', message: 'Could not select the original position.' };
+                        return { type: 'restore-set-ok' };
+                    }
+                    if (action.type === 'train') {
+                        const link = _crTrainLink(item.empId);
+                        if (!link || link.classList.contains('disabled')) return { type: 'fail', message: 'Train control is not available for ' + item.empName + '.' };
+                        _crClearMsg();
+                        link.click();
+                        const saw = await _crWait(1600, () => _crMsg().length > 0);
+                        const msg = _crMsg();
+                        if (!saw) return { type: 'fail', message: 'Train was not confirmed for ' + item.empName + '. Not counted.' };
+                        if (_crIsErr(msg)) return { type: 'fail', message: msg };
+                        Storage.logTrained(item.empId, item.empName, Math.floor(Date.now() / 1000), null);
+                        if (UI.state?.detailed && UI.state.detailed.trains_available != null) {
+                            UI.state.detailed.trains_available = Math.max(0, UI.state.detailed.trains_available - 1);
+                        }
+                        const counts = _crCounts(item);
+                        return { type: 'train-ok', currentToday: counts.today, currentContractDone: counts.contract };
+                    }
+                    return { type: 'fail', message: 'Unknown contract step.' };
+                };
+                async function _crLoop() {
+                    if (_crBusy) return;
+                    _crBusy = true;
+                    _crButtons();
+                    try {
+                        let guard = 0;
+                        while (guard++ < 400) {
+                            let run = _crLoad();
+                            if (!run || !run.active) break;
+                            const action = ContractStatRun.action(run);
+                            _crStatus(ContractStatRun.statusText(run) || run.error, run.error ? '#ef4444' : '#f59e0b');
+                            if (action.type === 'idle' || action.type === 'done') break;
+                            if (action.type === 'blocked') { _crStatus(action.message, '#ef4444'); break; }
+                            if (action.type === 'train') {
+                                const counts = _crCounts(action.item);
+                                const left = ContractStatRun.remaining(action.item, counts.today, counts.contract, UI.state?.detailed?.trains_available ?? run.trainsLeft ?? 0);
+                                if (left <= 0) {
+                                    run = ContractStatRun.reduce(run, { type: 'no-train' });
+                                    _crSave(run);
+                                    continue;
+                                }
+                            }
+                            if (action.type === 'advance') {
+                                run = ContractStatRun.reduce(run, { type: 'advance' });
+                                _crSave(run);
+                                continue;
+                            }
+                            const result = await _crPerform(action);
+                            run = ContractStatRun.reduce(_crLoad() || run, result);
+                            _crSave(run);
+                            if (result.type === 'fail') _crStatus(run.error, '#ef4444');
+                        }
+                    } finally {
+                        _crBusy = false;
+                        _crButtons();
+                        const run = _crLoad();
+                        if (run && run.error) _crStatus(run.error, '#ef4444');
+                        else if (!run || !run.active) _crStatus((run && run.phase === 'done') ? 'Contract training finished.' : 'Idle. Changing TCM Mode does not train anyone.', '#9ca3af');
+                    }
+                }
+                tcmById('tcm-cr-start')?.addEventListener('click', () => {
+                    if (_crBusy) return;
+                    const mode = (Storage.getSettings() || {}).rotationMode || 'priority';
+                    if (mode !== 'contract_rotational') {
+                        _crStatus('Select Contracts, then press Start. Changing the mode does not train anyone.', '#f59e0b');
+                        return;
+                    }
+                    const existing = _crLoad();
+                    if (existing && existing.active) { _crLoop(); return; }
+                    if (!UI.state) { _crStatus('Company data is not loaded yet.', '#ef4444'); return; }
+                    const plan = _crBuild();
+                    const begun = ContractStatRun.begin(plan, UI.state.detailed?.trains_available ?? 0);
+                    if (!begun.run.active) { _crStatus(begun.error, '#ef4444'); return; }
+                    _crSave(begun.run);
+                    _crLoop();
+                });
+                tcmById('tcm-cr-cancel')?.addEventListener('click', () => {
+                    const run = _crLoad();
+                    if (!run || !run.active || _crBusy) return;
+                    _crSave(ContractStatRun.reduce(run, { type: 'cancel' }));
+                    _crLoop();
+                });
+                _crButtons();
+                const _crExisting = _crLoad();
+                if (_crExisting && _crExisting.active) {
+                    _crStatus('Interrupted run saved for ' + ((ContractStatRun.current(_crExisting) || {}).empName || 'an employee') + '. Press Resume. The next contract will not start until this position is restored.', '#f59e0b');
+                }
 
 
                 function _psBestPosForStat(stat, empId) {
@@ -22230,6 +22778,7 @@ const trainNextBtn = tcmById('tcm-train-next-btn');
         window.__TCM_TEST_HOOKS.trainingLogQuery = _tcmTrainingLogQuery;
         window.__TCM_TEST_HOOKS.GistJournal = GistJournal;
         window.__TCM_TEST_HOOKS.GistSync = GistSync;
+        window.__TCM_TEST_HOOKS.ContractStatRun = ContractStatRun;
     }
     tcmBoot();
 
